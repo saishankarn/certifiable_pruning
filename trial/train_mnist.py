@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -29,6 +30,11 @@ trainset = torchvision.datasets.MNIST(root='./data', train=True,
 trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
                                           shuffle=True, num_workers=2)
 
+testset = torchvision.datasets.MNIST(root='./data', train=False,
+                                     download=True, transform=transform)
+testloader = torch.utils.data.DataLoader(testset, batch_size=64,
+                                         shuffle=False, num_workers=2)
+
 # Initialize the LeNet-300 model, loss function, and optimizer
 net = LeNet300()
 criterion = nn.CrossEntropyLoss()
@@ -55,3 +61,20 @@ for epoch in range(10):  # Loop over the dataset multiple times
     print('Epoch [%d], Loss: %.4f' % (epoch + 1, running_loss / (i + 1)))
 
 print('Finished training')
+
+# Evaluate the model on the test set
+net.eval()
+correct = 0
+total = 0
+with torch.no_grad():
+    for data in testloader:
+        inputs, labels = data
+        outputs = net(inputs)
+        _, predicted = outputs.max(1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
+
+print('Accuracy on test set: %.2f %%' % (100 * correct / total))
+
+os.makedirs('models/', exist_ok=True)
+torch.save(net.state_dict(), 'models/lenet300.pth')
