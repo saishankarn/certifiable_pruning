@@ -1,4 +1,6 @@
 import os 
+import math 
+import numpy as np
 
 import torch 
 import torch.nn as nn
@@ -95,9 +97,9 @@ else:
     torch.save(sensitivity_inputs, path)
 
 """
-calculating sensitivity for each weight column in all the layers
+calculating empirical sensitivity for each neuron in all the layers
 """
-sensitivity = {player : [] for player in prunable_layers}
+empirical_sensitivity = {player : [] for player in prunable_layers}
 for player in prunable_layers:
     print('considering pruning the layer - ', player)
     inputs = sensitivity_inputs[player]['in']
@@ -114,9 +116,7 @@ for player in prunable_layers:
     ## now we can calculate the sensitivity of each feature 
     numerator_list = []
     for fidx in range(num_features):
-        print(fidx)
         num = torch.matmul(weight[:, fidx].unsqueeze(1), inputs[fidx].unsqueeze(0))
-        print(num.shape)
         numerator_list.append(num)
 
     positive_denominator = torch.zeros(numerator_list[0].shape)
@@ -127,36 +127,72 @@ for player in prunable_layers:
         positive_denominator += pos_mat 
         negative_denominator += neg_mat
 
+    per_sample_sensitivity_dict = {}
     for fidx in range(num_features):
         num = numerator_list[fidx]
         mat1 = torch.div(num, positive_denominator)
         mat2 = torch.div(num, negative_denominator)
         mat = torch.cat((mat1.unsqueeze(-1), mat2.unsqueeze(-1)), axis=-1)
-        mat, _ = torch.max(mat, dim=-1)
-        print(mat.shape)
-        
-    
+        sen = torch.max(mat).item()
+        empirical_sensitivity[player].append(sen)
 
-#     for fidx in range(num_features):
-#         num = torch.matmul(weight[:, fidx].unsqueeze(1), inputs[fidx].unsqueeze(0))
-#         den_pos = 
-#         den_neg =  
-#         mat1 = torch.div(num, den_pos)
-#         mat2 = torch.div(num, den_neg)
-        
-#         sen = torch.max(mat).item()
-#         sensitivity[player].append(sen)
+"""
+calculating the importance sampling distribution from sensitivity scores
+"""
+importance_sampling_dist = {player : [] for player in prunable_layers}
+for player in prunable_layers:
+    player_sensitivities = empirical_sensitivity[player]
+    norm = sum(player_sensitivities)
+    player_dist = [player_sensitivities[i] / norm \
+                   for i in range(len(player_sensitivities))]
+  
+    importance_sampling_dist[player] = player_dist
+    print(max(player_dist))
+    print(min(player_dist))
 
-# """
-# calculating the importance sampling distribution from sensitivity scores
-# """
+"""
+Calculating the sample complexity based on eps and del
+The paper sets K = 3
+"""
 
-# importance_sampling_dist = {player : [] for player in prunable_layers}
-# for player in prunable_layers:
-#     player_sensitivities = sensitivity[player]
-#     norm = sum(player_sensitivities)
-#     player_dist = [player_sensitivities[i] / norm \
-#                    for i in range(len(player_sensitivities))]
-    
-#     importance_sampling_dist[player] = player_dist
+K = 3
+eps = 1e-2
+delta = 1e-1
+eta = {'fc1' : 300, 'fc2' : 100, 'fc3' : 10}
+
+layerwise_sample_complexity = {player : 0 for player in prunable_layers}
+for player in prunable_layers:
+    es = empirical_sensitivity[player]
+    es_sum = sum(es)
+    sample_complexity = (6 + 2*eps) * es_sum * K * eta[player] * math.log(4 * eta[player] / delta) * (1/eps) ** 2
+    layerwise_sample_complexity[player] = sample_complexity
+    print(es_sum)
+    print(eta[player])
+    print(math.log(4 * eta[player] / delta))
+    print((1/eps) ** 2)
+    print('------------')
+
+def get_unique_elements(input_list):
+    """
+    Returns a list of unique elements from the input list while preserving their order.
+    """
+    unique_elements = []
+    for item in input_list:
+        if item not in unique_elements:
+            unique_elements.append(item)
+    return unique_elements
+
+for player in prunable_layers:
+    player_dist = importance_sampling_dist[player]
+    sample_complexity = int(layerwise_sample_complexity[player])
+    chosen_features = []
+    for i in range(sample_complexity):
+        if i % 100000 == 0:
+            print(i)
+        feat = np.random.choice(len(player_dist), size=1, p=player_dist)
+        if feat in chosen_features:
+            continue
+        else:
+            chosen_features.append(feat)
+    print(chosen_features)
 
