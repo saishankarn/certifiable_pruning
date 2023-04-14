@@ -5,8 +5,8 @@ import torch
 import torchvision
 import torchprune as tp
 
-net_name = "lenet5_mnist"
-net = tp.util.models.lenet5(num_classes=10)
+net_name = "lenet300_mnist"
+net = tp.util.models.lenet300_mnist(num_classes=10)
 
 net = tp.util.net.NetHandle(net, net_name)
 
@@ -22,43 +22,9 @@ transform = torchvision.transforms.Compose(
 
 trainset = torchvision.datasets.MNIST(root='./data', train=True,
                                       download=True, transform=transform)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
-                                          shuffle=True, num_workers=2)
 
 testset = torchvision.datasets.MNIST(root='./data', train=False,
                                      download=True, transform=transform)
-testloader = torch.utils.data.DataLoader(testset, batch_size=128,
-                                         shuffle=False, num_workers=2)
-
-
-transform_train = [
-    torchvision.transforms.Pad(4),
-    torchvision.transforms.RandomCrop(32),
-    torchvision.transforms.RandomHorizontalFlip(),
-]
-transform_static = [
-    torchvision.transforms.ToTensor(),
-    torchvision.transforms.Normalize(
-        (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
-    ),
-]
-"""
-
-testset = torchvision.datasets.CIFAR10(
-    root="./local",
-    train=False,
-    download=True,
-    transform=tp.util.transforms.SmartCompose(transform_static),
-)
-
-trainset = torchvision.datasets.CIFAR10(
-    root="./local",
-    train=True,
-    download=True,
-    transform=tp.util.transforms.SmartCompose(
-        transform_train + transform_static
-    ),
-)
 
 size_s = 128
 batch_size = 128
@@ -74,8 +40,7 @@ loader_train = torch.utils.data.DataLoader(
     trainset, batch_size=batch_size, shuffle=False
 )
 
-# %% Setup trainer
-# Set up training parameters
+
 train_params = {
     # any loss and corresponding kwargs for __init__ from tp.util.nn_loss
     "loss": "CrossEntropyLoss",
@@ -98,7 +63,8 @@ train_params = {
     # desired number of epochs
     "startEpoch": 0,
     "retrainStartEpoch": -1,
-    "numEpochs": 5,  # 182
+    "earlyStopEpoch":100,
+    "numEpochs": 10,  # 182
     # any desired combination of lr schedulers from tp.util.lr_scheduler
     "lrSchedulers": [
         {
@@ -108,6 +74,7 @@ train_params = {
         },
         {"type": "WarmupLR", "stepKwargs": {"warmup_epoch": 5}, "kwargs": {}},
     ],
+    "enableAMP": False,
     # output size of the network
     "outputSize": 10,
     # directory to store checkpoints
@@ -130,45 +97,19 @@ trainer = tp.util.train.NetTrainer(
 # get a loss handle
 loss_handle = trainer.get_loss_handle()
 
-# %% Pre-train the network
 trainer.train(net, n_idx)
-
-# %% Prune weights on the CPU
-
-print("\n===========================")
-print("Pruning weights with SiPP")
-net_weight_pruned = tp.SiPPNet(net, loader_s, loss_handle)
-net_weight_pruned.compress(keep_ratio=keep_ratio)
-print(
-    f"The network has {net_weight_pruned.size()} parameters and "
-    f"{net_weight_pruned.flops()} FLOPs left."
-)
-print("===========================")
-
-# %% Prune filters on the GPU
-print("\n===========================")
-print("Pruning filters with PFP.")
 net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-net_filter_pruned.cuda()
-net_filter_pruned.compress(keep_ratio=keep_ratio)
-net_filter_pruned.cpu()
 print(
     f"The network has {net_filter_pruned.size()} parameters and "
     f"{net_filter_pruned.flops()} FLOPs left."
 )
-print("===========================")
+net_filter_pruned.cuda()
+net_filter_pruned.compress(keep_ratio=keep_ratio)
+net_filter_pruned.cpu()
+#print(net_filter_pruned.deterministic)
 
-# %% Retrain the filter-pruned network now.
-
-# Retrain the filter-pruned network now on the GPU
-net_filter_pruned = net_filter_pruned.cuda()
-trainer.retrain(net_filter_pruned, n_idx, keep_ratio, s_idx, r_idx)
-
-# %% Test at the end
-print("\nTesting on test data set:")
+#net_filter_pruned = net_filter_pruned.cuda()
+#trainer.retrain(net_filter_pruned, n_idx, keep_ratio, s_idx, r_idx)
 loss, acc1, acc5 = trainer.test(net_filter_pruned)
 print(f"Loss: {loss:.4f}, Top-1 Acc: {acc1*100:.2f}%, Top-5: {acc5*100:.2f}%")
-
-# Put back to CPU
-net_filter_pruned = net_filter_pruned.cpu()
-"""
+print("\nTesting on test data set:")
