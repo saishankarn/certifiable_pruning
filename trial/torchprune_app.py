@@ -5,8 +5,8 @@ import torch
 import torchvision
 import torchprune as tp
 
-net_name = "lenet300_mnist"
-net = tp.util.models.lenet300_mnist(num_classes=10)
+net_name = "lenet5_mnist"
+net = tp.util.models.lenet5_mnist(num_classes=10, num_in_channels=1)
 
 net = tp.util.net.NetHandle(net, net_name)
 
@@ -106,10 +106,9 @@ print(
 net_filter_pruned.cuda()
 net_filter_pruned.compress(keep_ratio=keep_ratio)
 net_filter_pruned.cpu()
-#print(net_filter_pruned.deterministic)
 
 #net_filter_pruned = net_filter_pruned.cuda()
 #trainer.retrain(net_filter_pruned, n_idx, keep_ratio, s_idx, r_idx)
 loss, acc1, acc5 = trainer.test(net_filter_pruned)
-print(f"Loss: {loss:.4f}, Top-1 Acc: {acc1*100:.2f}%, Top-5: {acc5*100:.2f}%")
-print("\nTesting on test data set:")
+# print(f"Loss: {loss:.4f}, Top-1 Acc: {acc1*100:.2f}%, Top-5: {acc5*100:.2f}%")
+# print("\nTesting on test data set:")
