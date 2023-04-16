@@ -1,4 +1,3 @@
-# %% import the required packages
 import os
 import copy
 import torch
@@ -99,40 +98,18 @@ else:
     print('Finished training')
     torch.save(net.state_dict(), model_path)
 
-class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
-    """Cross-entropy loss that can add auxiliary loss if present."""
-
-    def forward(self, input, target):
-        """Return cross-entropy loss and add auxiliary loss if possible."""
-        if isinstance(input, dict):
-            loss = super().forward(input["out"], target)
-            if "aux" in input:
-                loss += 0.5 * super().forward(input["aux"], target)
-        else:
-            loss = super().forward(input, target)
-        return loss
-
-# get a loss handle
-loss_handle = CrossEntropyLossWithAuxiliary()
-
-net = tp.util.net.NetHandle(net, name)
-net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-print(
-    f"The network has {net_filter_pruned.size()} parameters and "
-    f"{net_filter_pruned.flops()} FLOPs left."
-)
-net_filter_pruned.cuda()
-net_filter_pruned.compress(keep_ratio=0.5)
-net_filter_pruned.cpu()
+# Evaluate the model on the test set
 
 correct = 0
 total = 0
 with torch.no_grad():
     for data in loader_test:
         inputs, labels = data
-        outputs = net_filter_pruned(inputs)
+        outputs = net(inputs)
         _, predicted = outputs.max(1)
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
 
 print('Accuracy on test set: %.2f %%' % (100 * correct / total))
+
+backup_net = copy.deepcopy(net)
