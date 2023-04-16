@@ -8,6 +8,8 @@ import torchvision
 import torchvision.transforms as transforms
 import torchprune as tp
 
+from get_sensitivity import *
+
 """
 network architecture
 """
@@ -22,15 +24,25 @@ class LeNet5(nn.Module):
         self.fc3 = nn.Linear(84, num_classes) # Fully Connected Layer 3 (Output Layer): input features=84, output features=10 (number of classes in MNIST)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x)) # Apply Convolutional Layer 1 and ReLU activation
-        x = F.max_pool2d(x, 2) # Apply Max Pooling Layer 1
-        x = F.relu(self.conv2(x)) # Apply Convolutional Layer 2 and ReLU activation
-        x = F.max_pool2d(x, 2) # Apply Max Pooling Layer 2
-        x = x.view(-1, 16 * 4 * 4) # Flatten the feature maps
-        x = F.relu(self.fc1(x)) # Apply Fully Connected Layer 1 and ReLU activation
-        x = F.relu(self.fc2(x)) # Apply Fully Connected Layer 2 and ReLU activation
-        x = self.fc3(x) # Apply Fully Connected Layer 3 (Output Layer)
-        return x
+        in_0 = x
+        out_0 = self.conv1(in_0) # Apply Convolutional Layer 1 and ReLU activation
+
+        in_1 = F.relu(out_0)
+        in_1 = F.max_pool2d(in_1, 2) # Apply Max Pooling Layer 1
+        out_1 = self.conv2(in_1) # Apply Convolutional Layer 2 and ReLU activation
+        
+        in_2 = F.relu(out_1)
+        in_2 = F.max_pool2d(in_2, 2) # Apply Max Pooling Layer 2
+        in_2 = in_2.view(-1, 16 * 4 * 4) # Flatten the feature maps
+        out_2 = self.fc1(in_2) # Apply Fully Connected Layer 1 and ReLU activation
+        
+        in_3 = F.relu(out_2)
+        out_3 = self.fc2(in_3) # Apply Fully Connected Layer 2 and ReLU activation
+
+        in_4 = F.relu(out_3)
+        out_4 = self.fc3(in_4) # Apply Fully Connected Layer 3 (Output Layer)
+        
+        return [(in_0, in_1, in_2, in_3, in_4), (out_0, out_1, out_2, out_3, out_4)]
 
 name = 'lenet5_mnist'
 net = LeNet5(num_classes=10, num_in_channels=1)
@@ -55,7 +67,7 @@ testset, set_s = torch.utils.data.random_split(
     testset, [len(testset) - size_s, size_s]
 )
 
-loader_s = torch.utils.data.DataLoader(set_s, batch_size=32, shuffle=False)
+loader_s = torch.utils.data.DataLoader(set_s, batch_size=1, shuffle=False)
 loader_test = torch.utils.data.DataLoader(
     testset, batch_size=batch_size, shuffle=False
 )
@@ -84,7 +96,7 @@ else:
             optimizer.zero_grad()
 
             # Forward pass
-            outputs = net(inputs)
+            outputs = net(inputs)[-1][-1]
             loss = criterion(outputs, labels)
 
             # Backward pass
@@ -105,7 +117,7 @@ total = 0
 with torch.no_grad():
     for data in loader_test:
         inputs, labels = data
-        outputs = net(inputs)
+        outputs = net(inputs)[-1][-1]
         _, predicted = outputs.max(1)
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
@@ -113,3 +125,16 @@ with torch.no_grad():
 print('Accuracy on test set: %.2f %%' % (100 * correct / total))
 
 backup_net = copy.deepcopy(net)
+
+"""
+Let's start with Provable Filter Pruning
+First, we calculate sensitivity
+"""
+modules = [module for module in net.modules() if module != net and isinstance(module, nn.Module)]
+sens_list = [Sensitivity(module) for module in modules]
+
+for i_batch, (images, _) in enumerate(loader_s):
+    outputs = net(images)
+    for midx, sens in enumerate(sens_list):
+        sens_list[midx].compute_sensitivity_for_batch(outputs[0][midx].data, outputs[-1][midx].data)
+    
