@@ -10,7 +10,7 @@ import torchvision.transforms as transforms
 import torchprune as tp
 
 class Sensitivity:
-    def __init__(self, module):
+    def __init__(self, module): 
         self.module = module 
         self.weight = self.module.weight.data    
         idx_plus = self.weight > 0.0
@@ -26,6 +26,11 @@ class Sensitivity:
         self.module_minus = copy.deepcopy(module)
         self.module_minus.weight.data = weight_minus
         self.module_minus.state_dict()["bias"] = torch.zeros(self.module_minus.bias.shape).to(self.weight.device)
+
+        self.sensitivity = torch.zeros(self.weight.shape).to(self.weight.device)
+        self.sensitivity_in = torch.zeros(self.weight.shape[1]).to(self.weight.device)
+
+        self.num_patches = None
             
     def compute_sensitivity_for_batch(self, inp, out):
         pos = inp >= 0.0
@@ -51,10 +56,10 @@ class Sensitivity:
         else:
             out_no_bias = out.clone().detach()
 
-        print(inp_processed.shape)
-        #g_sens, g_sens_in = self.update_g_sens(inp_processed, outs_no_bias, out)
+        # print(inp_processed.shape, out_no_bias.shape, out.shape)
+        g_sens, g_sens_in = self._update_g_sens(inp_processed, out_no_bias, out)
 
-        #self._update_sensitivity(g_sens, g_sens_in)
+        self._update_sensitivity(g_sens, g_sens_in)
 
     def _process_denominator(self, z_values):
         # processing
@@ -71,7 +76,7 @@ class Sensitivity:
 
         return g_sens_f.clone().detach()
     
-    def flatten_all_but_last(tensor):
+    def flatten_all_but_last(self, tensor):
         """Flatten all dimensions except last one and return tensor."""
         return tensor.view(tensor[..., 0].numel(), tensor.shape[-1])
 
@@ -95,33 +100,42 @@ class Sensitivity:
             ),
         )
         return g_sens_f
+    
+    def unfold(self, x):
+        if isinstance(self.module, nn.Conv2d):
+            return nn.functional.unfold(
+                x,
+                kernel_size=self.module.kernel_size,
+                stride=self.module.stride,
+                padding=self.module.padding,
+                dilation=self.module.dilation,
+            )
+        else:
+            # flatten all batch dimensions, then unsqueeze last dim
+            return self.flatten_all_but_last(x).unsqueeze(-1)
+        
+    def _reduction(self, g_sens_f, dim):
+        return torch.max(g_sens_f, dim=dim)[0]
 
-    def _update_g_sens(self, activations, z_no_bias, outs):
-        # activations are adapted - seperated based on the sign into positive or negative 
-        # Wunfold.shape = (outFeature, filterSize)
-        # where filterSize = inFeatures*kappa1*kappa2 for conv2d
-        # or filterSize = inNeurons for linear
-        weight_plus = self._module_plus.weight.data
-        weight_minus = self._module_minus.weight.data
+    def _update_g_sens(self, activations, z_no_bias, out):
+        weight_plus = self.module_plus.weight.data
+        weight_minus = self.module_minus.weight.data
         w_unfold_plus = weight_plus.view((weight_minus.shape[0], -1))
         w_unfold_minus = weight_minus.view((weight_minus.shape[0], -1))
         #print(self.weight.shape, weight_plus.shape, weight_minus.shape, w_unfold_plus.shape, w_unfold_minus.shape)
 
-        # now compute Z, shape = [batchSize, outFeatures, outExamples], where
-        # outExamples = 1 for linear or
-        # outExamples = number of patches for conv2d
-        z_plus = self._module_plus(activations)
-        z_minus = self._module_minus(activations)
-        #print(activations.shape, z_plus.shape, z_minus.shape)
-        outs = self._reshape_z(outs)
+        z_plus = self.module_plus(activations)
+        z_minus = self.module_minus(activations)
+        # print(z_plus.shape, z_minus.shape, activations.shape)
+        # out = self._reshape_z(out)
         z_plus = self._reshape_z(z_plus)
         z_minus = self._reshape_z(z_minus)
         z_no_bias = self._reshape_z(z_no_bias)
         #print(outs.shape, z_plus.shape, z_minus.shape, z_no_bias.shape)
 
-        self._num_points_processed += activations.shape[0]
+        #self._num_points_processed += activations.shape[0]
 
-        self._current_batch += 1
+        #self._current_batch += 1
         z_plus = self._process_denominator(z_plus)
         z_minus = self._process_denominator(z_minus)
 

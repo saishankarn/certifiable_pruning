@@ -8,7 +8,7 @@ import torchvision
 import torchvision.transforms as transforms
 import torchprune as tp
 
-from get_sensitivity import *
+from get_sensitivity import * 
 
 """
 network architecture
@@ -136,5 +136,8 @@ sens_list = [Sensitivity(module) for module in modules]
 for i_batch, (images, _) in enumerate(loader_s):
     outputs = net(images)
     for midx, sens in enumerate(sens_list):
-        sens_list[midx].compute_sensitivity_for_batch(outputs[0][midx].data, outputs[-1][midx].data)
+        print("processing batch %d for module %d" % (i_batch+1, midx))
+        sens.compute_sensitivity_for_batch(outputs[0][midx].data, outputs[-1][midx].data)
     
+for midx, sens in enumerate(sens_list):
+    print(sens.sensitivity_in.shape)
