@@ -10,6 +10,7 @@ import torchvision.transforms as transforms
 import torchprune as tp
 from torchprune.method.pfp.pfp_tracker import PFPTracker
 from torchprune.util import tensor
+from scipy import optimize
 
 from get_sensitivity import * 
 
@@ -159,7 +160,49 @@ for ell in range(len(modules)):
     print(sens_trackers[ell].sensitivity_in)
 
 
+def get_optimal_compression_ratio(kr):
+    # check for look-up
+    if kr_compress in f_opt_lookup:
+        return f_opt_lookup[kr_compress]
 
+    # compress
+    b_per_layer = self._compress_once(kr_compress, backup_net)
+
+    # check resulting keep ratio
+    kr_actual = (
+        self.compressed_net.size() / self.original_net[0].size()
+    )
+    kr_diff = kr_actual - keep_ratio
+    print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
+
+    # set to zero if we are already close and stop
+    if abs(kr_diff) < 0.005 * keep_ratio:
+        kr_diff = 0.0
+
+    # store look-up
+    f_opt_lookup[kr_compress] = (kr_diff, b_per_layer)
+
+    return f_opt_lookup[kr_compress]
+
+
+keep_ratio = 0.5
+kr_min = 0.4 * keep_ratio
+kr_max = max(keep_ratio, 0.999)
+
+kr_opt = optimize.brentq(lambda keep_ratio: get_optimal_compression_ratio(keep_ratio)[0], kr_min, kr_max, maxiter=20, xtol=5e-3, rtol=5e-3, disp=True)
+
+b_per_layer, compressed_net = compress(kr_opt, backup_net) # define compress below
+compression = compressed_net.size() / backup_net.size()
+diff = compression - keep_ratio
+print("Current diff in keep ratio is: ", diff * 100)
+
+# set to zero if we are already close and stop
+if abs(diff) < 0.005 * keep_ratio:
+    diff = 0.0
+
+
+
+"""
 class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
 
     def forward(self, input, target):
@@ -183,3 +226,80 @@ print(
 #net_filter_pruned.cuda()
 net_filter_pruned.compress(keep_ratio=0.5)
 #net_filter_pruned.cpu()
+"""
+
+
+# boundaries for binary search over potential keep_ratios
+
+        # wrapper for root finding and look-up to speed it up.
+        f_opt_lookup = {}
+
+        def _f_opt(kr_compress):
+            # check for look-up
+            if kr_compress in f_opt_lookup:
+                return f_opt_lookup[kr_compress]
+
+            # compress
+            b_per_layer = self._compress_once(kr_compress, backup_net)
+
+            # check resulting keep ratio
+            kr_actual = (
+                self.compressed_net.size() / self.original_net[0].size()
+            )
+            kr_diff = kr_actual - keep_ratio
+            print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
+
+            # set to zero if we are already close and stop
+            if abs(kr_diff) < 0.005 * keep_ratio:
+                kr_diff = 0.0
+
+            # store look-up
+            f_opt_lookup[kr_compress] = (kr_diff, b_per_layer)
+
+            return f_opt_lookup[kr_compress]
+
+        # some times the keep ratio is pretty accurate
+        # so let's try with the correct keep ratio first
+        try:
+            # we can either run right away or update the boundaries for the
+            # binary search to make it faster.
+
+            kr_diff_nominal, b_per_layer = _f_opt(keep_ratio)
+            if kr_diff_nominal == 0.0:
+                return b_per_layer
+            elif kr_diff_nominal > 0.0:
+                kr_max = keep_ratio
+            else:
+                kr_min = keep_ratio
+
+        except (ValueError, RuntimeError):
+            pass
+
+        # run the root search
+        # if it fails we simply pick the best value from the look-up table
+        try:
+            kr_opt = optimize.brentq(
+                lambda kr: _f_opt(kr)[0],
+                kr_min,
+                kr_max,
+                maxiter=20,
+                xtol=5e-3,
+                rtol=5e-3,
+                disp=True,
+            )
+        except (ValueError, RuntimeError):
+            kr_diff_opt = float("inf")
+            kr_opt = None
+            for kr_compress, kr_diff_b_per_layer in f_opt_lookup.items():
+                kr_diff = kr_diff_b_per_layer[0]
+                if abs(kr_diff) < abs(kr_diff_opt):
+                    kr_diff_opt = kr_diff
+                    kr_opt = kr_compress
+            print(
+                "Cannot approximate keep ratio. "
+                f"Picking best available keep ratio {kr_opt * 100.0:.2f}% "
+                f"with actual diff {kr_diff_opt * 100.0:.2f}%."
+            )
+
+        # now run the compression one final time
+        return self._compress_once(kr_opt, backup_net)
