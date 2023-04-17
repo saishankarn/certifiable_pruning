@@ -7,7 +7,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
+
 import torchprune as tp
+from torchprune.method.pfp.pfp_tracker import PFPTracker
 
 """
 network architecture
@@ -50,7 +52,7 @@ trainset = torchvision.datasets.MNIST(root='./data', train=True,
 testset = torchvision.datasets.MNIST(root='./data', train=False,
                                      download=True, transform=transform)
 
-size_s = 128
+size_s = 1
 batch_size = 128
 testset, set_s = torch.utils.data.random_split(
     testset, [len(testset) - size_s, size_s]

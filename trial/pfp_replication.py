@@ -6,7 +6,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
+
 import torchprune as tp
+from torchprune.method.pfp.pfp_tracker import PFPTracker
+from torchprune.util import tensor
 
 from get_sensitivity import * 
 
@@ -26,22 +29,22 @@ class LeNet5(nn.Module):
     def forward(self, x):
         in_0 = x
         out_0 = self.conv1(in_0) # Apply Convolutional Layer 1 and ReLU activation
-
+        #print(in_0.shape, out_0.shape)
         in_1 = F.relu(out_0)
         in_1 = F.max_pool2d(in_1, 2) # Apply Max Pooling Layer 1
         out_1 = self.conv2(in_1) # Apply Convolutional Layer 2 and ReLU activation
-        
+        #print(in_1.shape, out_1.shape)
         in_2 = F.relu(out_1)
         in_2 = F.max_pool2d(in_2, 2) # Apply Max Pooling Layer 2
         in_2 = in_2.view(-1, 16 * 4 * 4) # Flatten the feature maps
         out_2 = self.fc1(in_2) # Apply Fully Connected Layer 1 and ReLU activation
-        
+        #print(in_2.shape, out_2.shape)
         in_3 = F.relu(out_2)
         out_3 = self.fc2(in_3) # Apply Fully Connected Layer 2 and ReLU activation
-
+        #print(in_3.shape, out_3.shape)
         in_4 = F.relu(out_3)
         out_4 = self.fc3(in_4) # Apply Fully Connected Layer 3 (Output Layer)
-        
+        #print(in_4.shape, out_4.shape)
         return [(in_0, in_1, in_2, in_3, in_4), (out_0, out_1, out_2, out_3, out_4)]
 
 name = 'lenet5_mnist'
@@ -131,13 +134,52 @@ Let's start with Provable Filter Pruning
 First, we calculate sensitivity
 """
 modules = [module for module in net.modules() if module != net and isinstance(module, nn.Module)]
-sens_list = [Sensitivity(module) for module in modules]
+sens_trackers = nn.ModuleList()
 
-for i_batch, (images, _) in enumerate(loader_s):
+for ell, module in enumerate(modules):
+    sens_trackers.append(PFPTracker(module))
+    sens_trackers[ell].enable_tracker()
+
+
+# get a loader with mini-batch size 1
+loader_mini = tensor.MiniDataLoader(loader_s, 1)
+num_batches = len(loader_mini)
+       
+for i_batch, (images, _) in enumerate(loader_mini):
     outputs = net(images)
-    for midx, sens in enumerate(sens_list):
-        print("processing batch %d for module %d" % (i_batch+1, midx))
-        sens.compute_sensitivity_for_batch(outputs[0][midx].data, outputs[-1][midx].data)
-    
-for midx, sens in enumerate(sens_list):
-    print(sens.sensitivity_in.shape)
+    #print(outputs[-1][-1])
+    #print(i_batch)
+    #print(images.shape)
+    for ell in range(len(modules)):
+        module = sens_trackers[ell].module
+        #print(outputs[0][ell].shape, outputs[1][ell].shape)
+        sens_trackers[ell]._hook(module, (outputs[0][ell],), outputs[1][ell]) 
+
+for ell in range(len(modules)):
+    print(sens_trackers[ell].sensitivity_in)
+
+
+
+class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
+
+    def forward(self, input, target):
+        if isinstance(input, dict):
+            loss = super().forward(input["out"], target)
+            if "aux" in input:
+                loss += 0.5 * super().forward(input["aux"], target)
+        else:
+            loss = super().forward(input, target)
+        return loss
+
+# get a loss handle
+loss_handle = CrossEntropyLossWithAuxiliary()
+
+net = tp.util.net.NetHandle(net, name)
+net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
+print(
+    f"The network has {net_filter_pruned.size()} parameters and "
+    f"{net_filter_pruned.flops()} FLOPs left."
+)
+#net_filter_pruned.cuda()
+net_filter_pruned.compress(keep_ratio=0.5)
+#net_filter_pruned.cpu()
