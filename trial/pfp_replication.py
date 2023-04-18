@@ -71,7 +71,7 @@ testset, set_s = torch.utils.data.random_split(
     testset, [len(testset) - size_s, size_s]
 )
 
-loader_s = torch.utils.data.DataLoader(set_s, batch_size=1, shuffle=False)
+loader_s = torch.utils.data.DataLoader(set_s, batch_size=32, shuffle=False)
 loader_test = torch.utils.data.DataLoader(
     testset, batch_size=batch_size, shuffle=False
 )
@@ -171,7 +171,7 @@ uncompressible_size = original_size - compressible_size # number of parameters t
 
 
 keep_ratio = 0.5
-delta_failure = 1e-3
+delta_failure = 1e-6
 kr_min = 0.4 * keep_ratio
 kr_max = max(keep_ratio, 0.999)
 
@@ -203,139 +203,26 @@ for i_batch, (images, _) in enumerate(loader_mini):
 """
 obtaining the probability
 """
-#sum_sens_dict = {}
-#prob_dict = {} 
-#patches_dict = {}
+
 for ell in range(len(modules)):
     sens_trackers[ell].probability = torch.zeros(sens_trackers[ell].sensitivity_in.shape)
     nnz = (sens_trackers[ell].sensitivity_in != 0.0).sum().view(-1)
     sum_sens = sens_trackers[ell].sensitivity_in.sum().view(-1)
     sens_trackers[ell].probability = sens_trackers[ell].sensitivity_in / sum_sens
-    #sum_sens_dict[ell] = sum_sens
-    #prob_dict[ell] = sens_trackers[ell].sensitivity_in / sum_sens
-    #patches_dict[ell] = sens_trackers[ell].num_patches
 
 # """
 # let's find the optimal compression rate possible that is close to the user requested compression
 # """
 
-def get_sens_stats(tracker):
-    sens_in = tracker.sensitivity_in
-    nnz = (sens_in != 0.0).sum().view(-1)
-    sum_sens = sens_in.sum().view(-1)
-    probs = sens_in / sum_sens
-
-    return nnz, sum_sens, probs
-
 def get_num_features(tensor, dim):
     dims_to_sum = [i for i in range(tensor.dim()) if i is not dim]
     return (torch.abs(tensor).sum(dims_to_sum) != 0).sum()
 
-def expected_unique(probabilities, sample_size):
-    """Get expected number of unique samples.
-
-    This computes the expected number of unique samples for a multinomial
-    distribution from which we sample a fixed number of times.
-
-    """
-    vals = 1 - (1 - probabilities) ** sample_size
-    expectation = torch.sum(torch.as_tensor(vals), dim=-1)
-    return torch.ceil(expectation)
-
-def _get_unique_samples(self, m_budget):
-        for i, _ in enumerate(m_budget):
-            # Reverse calibration
-            m_budget[i] = expected_unique(self._probability[i], m_budget[i])
-        return m_budget
-
-def _get_sample_complexity(self, eps, sens_tilde=None):
-        if sens_tilde is None:
-            sens_tilde = self._coeffs
-        k_constant = 3.0
-        m_budget = k_constant * (6 + 2 * eps) * sens_tilde / (eps ** 2)
-        m_budget = m_budget.ceil()
-        m_budget[m_budget == 0] = 1
-        return m_budget
-
-def _get_proposed_num_features(self, arg):
-        # get budget according to sample complexity
-        eps = arg
-        m_budget = self._get_sample_complexity(eps)
-        m_budget = self._get_unique_samples(m_budget).to(self._in_features)
-
-        # assign budget to in features if smaller
-        in_features = copy.deepcopy(self._in_features)
-        in_features[m_budget < in_features] = m_budget[m_budget < in_features]
-        in_features[in_features < 1] = 1
-
-        # propagate compression to out features by reducing by the same amount
-        in_feature_reduction = self._in_features - in_features
-        out_features = copy.deepcopy(self._out_features)
-        out_features[:-1] -= in_feature_reduction[1:]
-        out_features[out_features < 1] = 1
-
-        return out_features, in_features
-
-def _get_resulting_size(self, arg):
-        """Get resulting size for some arg."""
-        out_features, in_features = self._get_proposed_num_features(arg)
-        return self._get_size(out_features, in_features)
-
-def _get_coefficients(self, tracker):
-        """Get the coefficients according to our theorems."""
-        num_filters = tracker.sensitivity.shape[0]
-        num_patches = tracker.num_patches
-
-        # a few stats from sensitivity
-        nnz, sum_sens, probs = self._get_sens_stats(tracker)
-
-        # cool stuff
-        k_size = tracker.module.weight[0, 0].numel() # number of weights in a filter, for a fully connected layer it is 1.
-        log_numerator = torch.tensor(8.0 * (num_patches + 1) * k_size).to(
-            nnz.device
-        )
-        log_term = self._c_constant * torch.log(
-            log_numerator / self._delta_failure
-        )
-        alpha = 2.0 * log_term
-
-        # compute coefficients
-        coeffs = copy.deepcopy(sum_sens)
-        coeffs *= alpha
-        # compute leading coefficients
-        l_coeffs = torch.ones_like(coeffs)
-        l_coeffs = self._adapt_l_coeffs(l_coeffs, num_filters, num_patches)
-
-        return coeffs, nnz, l_coeffs, sum_sens, probs
-
-def sample_complexity(tracker):
-    num_filters = tracker.sensitivity.shape[0]
-    num_patches = tracker.num_patches
-    
-        # cool stuff
-        k_size = tracker.module.weight[0, 0].numel()
-        log_numerator = torch.tensor(8.0 * (num_patches + 1) * k_size).to(
-            nnz.device
-        )
-        log_term = self._c_constant * torch.log(
-            log_numerator / self._delta_failure
-        )
-        alpha = 2.0 * log_term
-
-        # compute coefficients
-        coeffs = copy.deepcopy(sum_sens)
-        coeffs *= alpha
-        # compute leading coefficients
-        l_coeffs = torch.ones_like(coeffs)
-        l_coeffs = self._adapt_l_coeffs(l_coeffs, num_filters, num_patches)
-
-        return coeffs, nnz, l_coeffs, sum_sens, probs
-
-def get_resulting_size_per_eps(eps):
+def get_resulting_layer_budget(eps):
     k_constant = 3.0
     c_constant = 3.0
     
-    resulting_size = 0
+    resulting_layer_budget = {}
     for ell in range(len(modules)):
         tracker = sens_trackers[ell]
         num_patches = tracker.num_patches
@@ -354,75 +241,114 @@ def get_resulting_size_per_eps(eps):
         sc = sc.ceil()
         if sc == 0:
             sc = 1
-        sample_complexity.append(sc)
 
         vals = 1 - (1 - probs) ** sc
         expectation = torch.sum(torch.as_tensor(vals), dim=-1)
         per_layer_budget = torch.ceil(expectation)
+        resulting_layer_budget[ell] = per_layer_budget
+
+    return resulting_layer_budget
+
+def get_resulting_size_per_eps(eps):
+    
+    layerwise_budget = get_resulting_layer_budget(eps)
+
+    total_in_features = []
+    in_feat_reduction = []
+    for ell in range(len(modules)):
+        tracker = sens_trackers[ell]
+        weight = tracker.module.weight
+        layer_budget = layerwise_budget[ell]
 
         in_features = get_num_features(weight, 1)
-        in_features[per_layer_budget < in_features] = per_layer_budget[per_layer_budget < in_features]
-        in_features[in_features < 1] = 1
+        if layer_budget < in_features:
+            in_features = layer_budget
+        if in_features < 1:
+            in_features = 1
 
-        in_feature_reduction = get_num_features(weight, 1) - in_features
-        out_features = get_num_features(weight, 0)
-        out_features[:-1] -= in_feature_reduction[1:]
-        out_features[out_features < 1] = 1
+        total_in_features.append(in_features)
+        in_feat_reduction.append(get_num_features(weight, 1) - in_features)
 
-        size_total = (in_features * out_features * k_size).sum()
+    resulting_size = 0
+    for ell in range(len(modules)):
+        tracker = sens_trackers[ell]
+        weight = tracker.module.weight
+
+        out_features = float(get_num_features(weight, 0))
+        if ell < len(modules)-1:
+            sub = in_feat_reduction[ell+1] 
+            out_features -= float(sub) 
+        out_features = 1
+
+        in_features = total_in_features[ell]
+        k_size = weight[0, 0].numel()
+        size_total = float(in_features * out_features * k_size)
         resulting_size += size_total
 
     return resulting_size
 
+def get_layerwise_size_per_eps(eps):
     
+    layerwise_budget = get_resulting_layer_budget(eps)
+
+    total_in_features = []
+    in_feat_reduction = []
+    for ell in range(len(modules)):
+        tracker = sens_trackers[ell]
+        weight = tracker.module.weight
+        layer_budget = layerwise_budget[ell]
+
+        in_features = get_num_features(weight, 1)
+        if layer_budget < in_features:
+            in_features = layer_budget
+        if in_features < 1:
+            in_features = 1
+
+        total_in_features.append(in_features)
+        in_feat_reduction.append(get_num_features(weight, 1) - in_features)
+
+    total_out_features = []
+    for ell in range(len(modules)):
+        tracker = sens_trackers[ell]
+        weight = tracker.module.weight
+
+        out_features = get_num_features(weight, 0)
+        if ell < len(modules)-1:
+            sub = in_feat_reduction[ell+1] 
+            out_features -= sub 
+        out_features = 1
+        total_out_features.append(out_features)
+    
+    return total_in_features, total_out_features
+
+def find_opt_eps(budget):
+    eps_min = 1e-300
+    eps_max = 1e150
+
+    def f_opt(arg):
+        size_resulting = get_resulting_size_per_eps(arg)
+        return budget - size_resulting
+    
+    f_value_min = f_opt(eps_min)
+    f_value_max = f_opt(eps_max)
+    print(f_value_min, f_value_max)
+    if f_value_min * f_value_max > 0:
+        print("pruning not possible")
+        return 0
+
+    eps_opt = optimize.brentq(f_opt, eps_min, eps_max, maxiter=1000, xtol=10e-250, disp=False)
+        
+    return eps_opt
+
+find_opt_eps(25000)
+
+"""
+now let's compress
+"""
 
 
-
-def _allocate_method(self, budget, disp=False):
-        # set up bisection method
-        arg_min = 1e-300
-        arg_max = 1e150
-
-        def f_opt(arg):
-            size_resulting = self._get_resulting_size(arg)
-            return budget - size_resulting
-
-        # solve with bisection method and get resulting feature allocation
-        f_value_min = f_opt(arg_min)
-        f_value_max = f_opt(arg_max)
-        if f_value_min.sign() == f_value_max.sign():
-            arg_opt, f_value_opt = (
-                (arg_min, f_value_min)
-                if abs(f_value_min) < abs(f_value_max)
-                else (arg_max, f_value_max)
-            )
-            error_msg = (
-                "no bisection possible"
-                f"; argMin: {arg_min}, minF: {f_value_min}"
-                f"; argMax: {arg_max}, maxF: {f_value_max}"
-            )
-            print(error_msg)
-            if disp and abs(f_value_opt) / budget > 0.005:
-                raise ValueError(error_msg)
-        else:
-            arg_opt = optimize.brentq(
-                f_opt, arg_min, arg_max, maxiter=1000, xtol=10e-250, disp=False
-            )
-        out_features, in_features = self._get_proposed_num_features(arg_opt)
-
-        # store allocation
-        if self._out_mode:
-            self._allocation = out_features
-        else:
-            self._allocation = in_features
-
-        # keep track of _arg_opt as well
-        self._arg_opt = arg_opt
 def compress(keep_ratio):
-    """Execute the compression step starting from given parameters."""
-    # replace parameters first
-    compressed_net = copy.deepcopy(backup_net)
-    
+        
     budget_total = int(keep_ratio * original_size) # the total number of parameters we can have
     budget_available = budget_total - uncompressible_size # few of them cannot be compressed like the bias.
     
@@ -430,97 +356,35 @@ def compress(keep_ratio):
     budget_available = min(budget_available, compressible_size)
     budget_available = max(0, budget_available)
 
-        # allocate with "available" budget
-        self.allocator.allocate_budget(budget_available)
-
-        # loop through the layers in reverse to compress
-        for ell in reversed(self.layers):
-            # get the pruner and compute probabilities
-            pruner = self.pruners[ell]
-
-            # get the sparsifier from a pruner
-            sparsifier = self._get_sparsifier(pruner)
-
-            # generate sparsification
-            size_pruned = self.allocator.get_num_samples(ell)
-            num_samples = pruner.prune(size_pruned)
-            weight_hat = sparsifier.sparsify(num_samples)
-
-            if isinstance(weight_hat, tuple):
-                # set compression
-                self._set_compression(ell, weight_hat[0], weight_hat[1])
-            else:
-                self._set_compression(ell, weight_hat)
-
-        # "spread" compression across layers for full compression potential
-        self._propagate_compression()
-
-        # keep track of layer budget (nonzero weights per layer)
-        budget_per_layer = [
-            (module.weight != 0.0).sum().item()
-            for module in self.compressed_net.compressible_layers
-        ]
-
-        # return stats about compression here
-        return budget_per_layer
-
-# compression_look_up = {}
-# def get_optimal_compression_ratio(kr):
-#     if kr in compression_look_up:
-#         return compression_look_up[kr]
-    
-
-#     b_per_layer, compressed_net = compress(kr)
-#     compression = compressed_net.size() / backup_net.size()
-#     diff = compression - keep_ratio
-#     print("Current diff in keep ratio is: ", diff * 100)
-
-#     # set to zero if we are already close and stop
-#     if abs(diff) < 0.005 * keep_ratio:
-#         diff = 0.0
-
-#     compression_look_up[kr] = (diff, b_per_layer)
-
-#     return compression_look_up[kr]
+    eps_opt = find_opt_eps(budget_available)
+    req_in_features, req_out_features = get_layerwise_size_per_eps(eps_opt)
 
 
 
-# kr_opt = optimize.brentq(lambda keep_ratio: get_optimal_compression_ratio(keep_ratio)[0], \
-#                                             kr_min, kr_max, maxiter=20, xtol=5e-3, rtol=5e-3, disp=True)
-
-# b_per_layer, compressed_net = compress(kr_opt, backup_net) # define compress below
-# compression = compressed_net.size() / backup_net.size()
-# diff = compression - keep_ratio
-# print("Current diff in keep ratio is: ", diff * 100)
-
-# # set to zero if we are already close and stop
-# if abs(diff) < 0.005 * keep_ratio:
-#     diff = 0.0
 
 
 
-# """
-# class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
+class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
 
-#     def forward(self, input, target):
-#         if isinstance(input, dict):
-#             loss = super().forward(input["out"], target)
-#             if "aux" in input:
-#                 loss += 0.5 * super().forward(input["aux"], target)
-#         else:
-#             loss = super().forward(input, target)
-#         return loss
+    def forward(self, input, target):
+        if isinstance(input, dict):
+            loss = super().forward(input["out"], target)
+            if "aux" in input:
+                loss += 0.5 * super().forward(input["aux"], target)
+        else:
+            loss = super().forward(input, target)
+        return loss
 
-# # get a loss handle
-# loss_handle = CrossEntropyLossWithAuxiliary()
+# get a loss handle
+loss_handle = CrossEntropyLossWithAuxiliary()
 
-# net = tp.util.net.NetHandle(net, name)
-# net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-# print(
-#     f"The network has {net_filter_pruned.size()} parameters and "
-#     f"{net_filter_pruned.flops()} FLOPs left."
-# )
-# #net_filter_pruned.cuda()
-# net_filter_pruned.compress(keep_ratio=0.5)
-# #net_filter_pruned.cpu()
-# """
+net = tp.util.net.NetHandle(net, name)
+net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
+print(
+    f"The network has {net_filter_pruned.size()} parameters and "
+    f"{net_filter_pruned.flops()} FLOPs left."
+)
+#net_filter_pruned.cuda()
+net_filter_pruned.compress(keep_ratio=0.5)
+#net_filter_pruned.cpu()
+
