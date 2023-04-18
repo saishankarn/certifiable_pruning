@@ -132,15 +132,56 @@ backup_net = copy.deepcopy(net)
 
 """
 Let's start with Provable Filter Pruning
-First, we calculate sensitivity
+Some basic definitions and declarations first
 """
 modules = [module for module in net.modules() if module != net and isinstance(module, nn.Module)]
 sens_trackers = nn.ModuleList()
 
+def get_original_size(modules):
+    nonzeros = 0
+    for module in modules:
+        for param in module.parameters():
+            if param is not None:
+                nonzeros += (param != 0.0).sum().item()
+    return nonzeros
+
+def get_compressible_size(modules):
+    nonzeros = 0
+    for module in modules:
+        nonzeros += (module.weight != 0.0).sum().item()
+    return nonzeros
+
+def get_compressible_layers(modules):
+    compressible_layers = []
+    num_weights = []
+    for module in modules:
+        if not isinstance(module, (nn.Conv2d, nn.Linear)):
+            continue
+        if hasattr(module, "groups") and module.groups > 1:
+            continue
+        compressible_layers.append(module)
+        num_weights.append(module.weight.data.numel())
+
+    return compressible_layers, num_weights
+
+original_size = get_original_size(modules) # contains the number of non-zero parameters
+compressible_layers, num_weights = get_compressible_layers(modules) 
+compressible_size = get_compressible_size(modules) # contains the number of non-zero parameters belonging to the weight and the bias is excluded
+uncompressible_size = original_size - compressible_size # number of parameters that belong to the bias in different layers
+
+
+keep_ratio = 0.5
+delta_failure = 1e-3
+kr_min = 0.4 * keep_ratio
+kr_max = max(keep_ratio, 0.999)
+
+"""
+Now let's calculate sensitivity
+"""
+
 for ell, module in enumerate(modules):
     sens_trackers.append(PFPTracker(module))
     sens_trackers[ell].enable_tracker()
-
 
 # get a loader with mini-batch size 1
 loader_mini = tensor.MiniDataLoader(loader_s, 1)
@@ -156,150 +197,330 @@ for i_batch, (images, _) in enumerate(loader_mini):
         #print(outputs[0][ell].shape, outputs[1][ell].shape)
         sens_trackers[ell]._hook(module, (outputs[0][ell],), outputs[1][ell]) 
 
+# for ell in range(len(modules)):
+#     print(sens_trackers[ell].sensitivity_in)
+
+"""
+obtaining the probability
+"""
+#sum_sens_dict = {}
+#prob_dict = {} 
+#patches_dict = {}
 for ell in range(len(modules)):
-    print(sens_trackers[ell].sensitivity_in)
+    sens_trackers[ell].probability = torch.zeros(sens_trackers[ell].sensitivity_in.shape)
+    nnz = (sens_trackers[ell].sensitivity_in != 0.0).sum().view(-1)
+    sum_sens = sens_trackers[ell].sensitivity_in.sum().view(-1)
+    sens_trackers[ell].probability = sens_trackers[ell].sensitivity_in / sum_sens
+    #sum_sens_dict[ell] = sum_sens
+    #prob_dict[ell] = sens_trackers[ell].sensitivity_in / sum_sens
+    #patches_dict[ell] = sens_trackers[ell].num_patches
+
+# """
+# let's find the optimal compression rate possible that is close to the user requested compression
+# """
+
+def get_sens_stats(tracker):
+    sens_in = tracker.sensitivity_in
+    nnz = (sens_in != 0.0).sum().view(-1)
+    sum_sens = sens_in.sum().view(-1)
+    probs = sens_in / sum_sens
+
+    return nnz, sum_sens, probs
+
+def get_num_features(tensor, dim):
+    dims_to_sum = [i for i in range(tensor.dim()) if i is not dim]
+    return (torch.abs(tensor).sum(dims_to_sum) != 0).sum()
+
+def expected_unique(probabilities, sample_size):
+    """Get expected number of unique samples.
+
+    This computes the expected number of unique samples for a multinomial
+    distribution from which we sample a fixed number of times.
+
+    """
+    vals = 1 - (1 - probabilities) ** sample_size
+    expectation = torch.sum(torch.as_tensor(vals), dim=-1)
+    return torch.ceil(expectation)
+
+def _get_unique_samples(self, m_budget):
+        for i, _ in enumerate(m_budget):
+            # Reverse calibration
+            m_budget[i] = expected_unique(self._probability[i], m_budget[i])
+        return m_budget
+
+def _get_sample_complexity(self, eps, sens_tilde=None):
+        if sens_tilde is None:
+            sens_tilde = self._coeffs
+        k_constant = 3.0
+        m_budget = k_constant * (6 + 2 * eps) * sens_tilde / (eps ** 2)
+        m_budget = m_budget.ceil()
+        m_budget[m_budget == 0] = 1
+        return m_budget
+
+def _get_proposed_num_features(self, arg):
+        # get budget according to sample complexity
+        eps = arg
+        m_budget = self._get_sample_complexity(eps)
+        m_budget = self._get_unique_samples(m_budget).to(self._in_features)
+
+        # assign budget to in features if smaller
+        in_features = copy.deepcopy(self._in_features)
+        in_features[m_budget < in_features] = m_budget[m_budget < in_features]
+        in_features[in_features < 1] = 1
+
+        # propagate compression to out features by reducing by the same amount
+        in_feature_reduction = self._in_features - in_features
+        out_features = copy.deepcopy(self._out_features)
+        out_features[:-1] -= in_feature_reduction[1:]
+        out_features[out_features < 1] = 1
+
+        return out_features, in_features
+
+def _get_resulting_size(self, arg):
+        """Get resulting size for some arg."""
+        out_features, in_features = self._get_proposed_num_features(arg)
+        return self._get_size(out_features, in_features)
+
+def _get_coefficients(self, tracker):
+        """Get the coefficients according to our theorems."""
+        num_filters = tracker.sensitivity.shape[0]
+        num_patches = tracker.num_patches
+
+        # a few stats from sensitivity
+        nnz, sum_sens, probs = self._get_sens_stats(tracker)
+
+        # cool stuff
+        k_size = tracker.module.weight[0, 0].numel() # number of weights in a filter, for a fully connected layer it is 1.
+        log_numerator = torch.tensor(8.0 * (num_patches + 1) * k_size).to(
+            nnz.device
+        )
+        log_term = self._c_constant * torch.log(
+            log_numerator / self._delta_failure
+        )
+        alpha = 2.0 * log_term
+
+        # compute coefficients
+        coeffs = copy.deepcopy(sum_sens)
+        coeffs *= alpha
+        # compute leading coefficients
+        l_coeffs = torch.ones_like(coeffs)
+        l_coeffs = self._adapt_l_coeffs(l_coeffs, num_filters, num_patches)
+
+        return coeffs, nnz, l_coeffs, sum_sens, probs
+
+def sample_complexity(tracker):
+    num_filters = tracker.sensitivity.shape[0]
+    num_patches = tracker.num_patches
+    
+        # cool stuff
+        k_size = tracker.module.weight[0, 0].numel()
+        log_numerator = torch.tensor(8.0 * (num_patches + 1) * k_size).to(
+            nnz.device
+        )
+        log_term = self._c_constant * torch.log(
+            log_numerator / self._delta_failure
+        )
+        alpha = 2.0 * log_term
+
+        # compute coefficients
+        coeffs = copy.deepcopy(sum_sens)
+        coeffs *= alpha
+        # compute leading coefficients
+        l_coeffs = torch.ones_like(coeffs)
+        l_coeffs = self._adapt_l_coeffs(l_coeffs, num_filters, num_patches)
+
+        return coeffs, nnz, l_coeffs, sum_sens, probs
+
+def get_resulting_size_per_eps(eps):
+    k_constant = 3.0
+    c_constant = 3.0
+    
+    resulting_size = 0
+    for ell in range(len(modules)):
+        tracker = sens_trackers[ell]
+        num_patches = tracker.num_patches
+        weight = tracker.module.weight
+
+        sens_in = tracker.sensitivity_in
+        nnz = (sens_in != 0.0).sum().view(-1)
+        sum_sens = sens_in.sum().view(-1)
+        probs = sens_in / sum_sens
+
+        k_size = weight[0, 0].numel()
+        log_numerator = torch.tensor(8.0 * (num_patches + 1) * k_size).to(nnz.device)
+        log_term = c_constant * torch.log(log_numerator / delta_failure)
+        sens_tilde = sum_sens * 2.0 * log_term 
+        sc = k_constant * (6 + 2 * eps) * sens_tilde / (eps ** 2)
+        sc = sc.ceil()
+        if sc == 0:
+            sc = 1
+        sample_complexity.append(sc)
+
+        vals = 1 - (1 - probs) ** sc
+        expectation = torch.sum(torch.as_tensor(vals), dim=-1)
+        per_layer_budget = torch.ceil(expectation)
+
+        in_features = get_num_features(weight, 1)
+        in_features[per_layer_budget < in_features] = per_layer_budget[per_layer_budget < in_features]
+        in_features[in_features < 1] = 1
+
+        in_feature_reduction = get_num_features(weight, 1) - in_features
+        out_features = get_num_features(weight, 0)
+        out_features[:-1] -= in_feature_reduction[1:]
+        out_features[out_features < 1] = 1
+
+        size_total = (in_features * out_features * k_size).sum()
+        resulting_size += size_total
+
+    return resulting_size
+
+    
 
 
-def get_optimal_compression_ratio(kr):
-    # check for look-up
-    if kr_compress in f_opt_lookup:
-        return f_opt_lookup[kr_compress]
 
-    # compress
-    b_per_layer = self._compress_once(kr_compress, backup_net)
+def _allocate_method(self, budget, disp=False):
+        # set up bisection method
+        arg_min = 1e-300
+        arg_max = 1e150
 
-    # check resulting keep ratio
-    kr_actual = (
-        self.compressed_net.size() / self.original_net[0].size()
-    )
-    kr_diff = kr_actual - keep_ratio
-    print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
+        def f_opt(arg):
+            size_resulting = self._get_resulting_size(arg)
+            return budget - size_resulting
 
-    # set to zero if we are already close and stop
-    if abs(kr_diff) < 0.005 * keep_ratio:
-        kr_diff = 0.0
-
-    # store look-up
-    f_opt_lookup[kr_compress] = (kr_diff, b_per_layer)
-
-    return f_opt_lookup[kr_compress]
-
-
-keep_ratio = 0.5
-kr_min = 0.4 * keep_ratio
-kr_max = max(keep_ratio, 0.999)
-
-kr_opt = optimize.brentq(lambda keep_ratio: get_optimal_compression_ratio(keep_ratio)[0], kr_min, kr_max, maxiter=20, xtol=5e-3, rtol=5e-3, disp=True)
-
-b_per_layer, compressed_net = compress(kr_opt, backup_net) # define compress below
-compression = compressed_net.size() / backup_net.size()
-diff = compression - keep_ratio
-print("Current diff in keep ratio is: ", diff * 100)
-
-# set to zero if we are already close and stop
-if abs(diff) < 0.005 * keep_ratio:
-    diff = 0.0
-
-
-
-"""
-class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
-
-    def forward(self, input, target):
-        if isinstance(input, dict):
-            loss = super().forward(input["out"], target)
-            if "aux" in input:
-                loss += 0.5 * super().forward(input["aux"], target)
+        # solve with bisection method and get resulting feature allocation
+        f_value_min = f_opt(arg_min)
+        f_value_max = f_opt(arg_max)
+        if f_value_min.sign() == f_value_max.sign():
+            arg_opt, f_value_opt = (
+                (arg_min, f_value_min)
+                if abs(f_value_min) < abs(f_value_max)
+                else (arg_max, f_value_max)
+            )
+            error_msg = (
+                "no bisection possible"
+                f"; argMin: {arg_min}, minF: {f_value_min}"
+                f"; argMax: {arg_max}, maxF: {f_value_max}"
+            )
+            print(error_msg)
+            if disp and abs(f_value_opt) / budget > 0.005:
+                raise ValueError(error_msg)
         else:
-            loss = super().forward(input, target)
-        return loss
-
-# get a loss handle
-loss_handle = CrossEntropyLossWithAuxiliary()
-
-net = tp.util.net.NetHandle(net, name)
-net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-print(
-    f"The network has {net_filter_pruned.size()} parameters and "
-    f"{net_filter_pruned.flops()} FLOPs left."
-)
-#net_filter_pruned.cuda()
-net_filter_pruned.compress(keep_ratio=0.5)
-#net_filter_pruned.cpu()
-"""
-
-
-# boundaries for binary search over potential keep_ratios
-
-        # wrapper for root finding and look-up to speed it up.
-        f_opt_lookup = {}
-
-        def _f_opt(kr_compress):
-            # check for look-up
-            if kr_compress in f_opt_lookup:
-                return f_opt_lookup[kr_compress]
-
-            # compress
-            b_per_layer = self._compress_once(kr_compress, backup_net)
-
-            # check resulting keep ratio
-            kr_actual = (
-                self.compressed_net.size() / self.original_net[0].size()
+            arg_opt = optimize.brentq(
+                f_opt, arg_min, arg_max, maxiter=1000, xtol=10e-250, disp=False
             )
-            kr_diff = kr_actual - keep_ratio
-            print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
+        out_features, in_features = self._get_proposed_num_features(arg_opt)
 
-            # set to zero if we are already close and stop
-            if abs(kr_diff) < 0.005 * keep_ratio:
-                kr_diff = 0.0
+        # store allocation
+        if self._out_mode:
+            self._allocation = out_features
+        else:
+            self._allocation = in_features
 
-            # store look-up
-            f_opt_lookup[kr_compress] = (kr_diff, b_per_layer)
+        # keep track of _arg_opt as well
+        self._arg_opt = arg_opt
+def compress(keep_ratio):
+    """Execute the compression step starting from given parameters."""
+    # replace parameters first
+    compressed_net = copy.deepcopy(backup_net)
+    
+    budget_total = int(keep_ratio * original_size) # the total number of parameters we can have
+    budget_available = budget_total - uncompressible_size # few of them cannot be compressed like the bias.
+    
+    # some sanity checks for the budget
+    budget_available = min(budget_available, compressible_size)
+    budget_available = max(0, budget_available)
 
-            return f_opt_lookup[kr_compress]
+        # allocate with "available" budget
+        self.allocator.allocate_budget(budget_available)
 
-        # some times the keep ratio is pretty accurate
-        # so let's try with the correct keep ratio first
-        try:
-            # we can either run right away or update the boundaries for the
-            # binary search to make it faster.
+        # loop through the layers in reverse to compress
+        for ell in reversed(self.layers):
+            # get the pruner and compute probabilities
+            pruner = self.pruners[ell]
 
-            kr_diff_nominal, b_per_layer = _f_opt(keep_ratio)
-            if kr_diff_nominal == 0.0:
-                return b_per_layer
-            elif kr_diff_nominal > 0.0:
-                kr_max = keep_ratio
+            # get the sparsifier from a pruner
+            sparsifier = self._get_sparsifier(pruner)
+
+            # generate sparsification
+            size_pruned = self.allocator.get_num_samples(ell)
+            num_samples = pruner.prune(size_pruned)
+            weight_hat = sparsifier.sparsify(num_samples)
+
+            if isinstance(weight_hat, tuple):
+                # set compression
+                self._set_compression(ell, weight_hat[0], weight_hat[1])
             else:
-                kr_min = keep_ratio
+                self._set_compression(ell, weight_hat)
 
-        except (ValueError, RuntimeError):
-            pass
+        # "spread" compression across layers for full compression potential
+        self._propagate_compression()
 
-        # run the root search
-        # if it fails we simply pick the best value from the look-up table
-        try:
-            kr_opt = optimize.brentq(
-                lambda kr: _f_opt(kr)[0],
-                kr_min,
-                kr_max,
-                maxiter=20,
-                xtol=5e-3,
-                rtol=5e-3,
-                disp=True,
-            )
-        except (ValueError, RuntimeError):
-            kr_diff_opt = float("inf")
-            kr_opt = None
-            for kr_compress, kr_diff_b_per_layer in f_opt_lookup.items():
-                kr_diff = kr_diff_b_per_layer[0]
-                if abs(kr_diff) < abs(kr_diff_opt):
-                    kr_diff_opt = kr_diff
-                    kr_opt = kr_compress
-            print(
-                "Cannot approximate keep ratio. "
-                f"Picking best available keep ratio {kr_opt * 100.0:.2f}% "
-                f"with actual diff {kr_diff_opt * 100.0:.2f}%."
-            )
+        # keep track of layer budget (nonzero weights per layer)
+        budget_per_layer = [
+            (module.weight != 0.0).sum().item()
+            for module in self.compressed_net.compressible_layers
+        ]
 
-        # now run the compression one final time
-        return self._compress_once(kr_opt, backup_net)
+        # return stats about compression here
+        return budget_per_layer
+
+# compression_look_up = {}
+# def get_optimal_compression_ratio(kr):
+#     if kr in compression_look_up:
+#         return compression_look_up[kr]
+    
+
+#     b_per_layer, compressed_net = compress(kr)
+#     compression = compressed_net.size() / backup_net.size()
+#     diff = compression - keep_ratio
+#     print("Current diff in keep ratio is: ", diff * 100)
+
+#     # set to zero if we are already close and stop
+#     if abs(diff) < 0.005 * keep_ratio:
+#         diff = 0.0
+
+#     compression_look_up[kr] = (diff, b_per_layer)
+
+#     return compression_look_up[kr]
+
+
+
+# kr_opt = optimize.brentq(lambda keep_ratio: get_optimal_compression_ratio(keep_ratio)[0], \
+#                                             kr_min, kr_max, maxiter=20, xtol=5e-3, rtol=5e-3, disp=True)
+
+# b_per_layer, compressed_net = compress(kr_opt, backup_net) # define compress below
+# compression = compressed_net.size() / backup_net.size()
+# diff = compression - keep_ratio
+# print("Current diff in keep ratio is: ", diff * 100)
+
+# # set to zero if we are already close and stop
+# if abs(diff) < 0.005 * keep_ratio:
+#     diff = 0.0
+
+
+
+# """
+# class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
+
+#     def forward(self, input, target):
+#         if isinstance(input, dict):
+#             loss = super().forward(input["out"], target)
+#             if "aux" in input:
+#                 loss += 0.5 * super().forward(input["aux"], target)
+#         else:
+#             loss = super().forward(input, target)
+#         return loss
+
+# # get a loss handle
+# loss_handle = CrossEntropyLossWithAuxiliary()
+
+# net = tp.util.net.NetHandle(net, name)
+# net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
+# print(
+#     f"The network has {net_filter_pruned.size()} parameters and "
+#     f"{net_filter_pruned.flops()} FLOPs left."
+# )
+# #net_filter_pruned.cuda()
+# net_filter_pruned.compress(keep_ratio=0.5)
+# #net_filter_pruned.cpu()
+# """
