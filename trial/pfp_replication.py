@@ -353,11 +353,12 @@ def get_layerwise_size_per_eps(eps):
         tracker = sens_trackers[ell]
         weight = tracker.module.weight
 
-        out_features = get_num_features(weight, 0)
+        out_features = float(get_num_features(weight, 0))
         if ell < len(modules)-1:
             sub = in_feat_reduction[ell+1] 
-            out_features -= sub 
-        out_features = 1
+            out_features -= float(sub) 
+        if out_features < 1:
+            out_features = 1
         total_out_features.append(out_features)
     
     return total_in_features, total_out_features
@@ -372,7 +373,7 @@ def find_opt_eps(budget):
     
     f_value_min = f_opt(eps_min)
     f_value_max = f_opt(eps_max)
-    print(f_value_min, f_value_max)
+    #print(f_value_min, f_value_max)
     if f_value_min * f_value_max > 0:
         print("pruning not possible")
         return 0
@@ -382,14 +383,70 @@ def find_opt_eps(budget):
     return eps_opt
 
 #find_opt_eps(int(original_size*keep_ratio))
-print(find_opt_eps(21977))
 
 """
 now let's compress
 """
 
+def prune(size_pruned, probs):
+    mask = torch.zeros_like(probs, dtype=torch.bool)
+    if size_pruned > 0:
+        size_pruned = int(size_pruned.cpu().numpy())
+        idx_top = np.argpartition(probs.view(-1).cpu().numpy(), -size_pruned)[-size_pruned:]
+        mask.view(-1)[idx_top] = True
+    masked_features = mask.view(mask.shape[0], -1).sum(dim=-1)
+        
+    return masked_features
 
-# def compress(self, keep_ratio, from_original=True, initialize=True):
+def sparsify(masked_features, weight_original):
+    gammas = copy.deepcopy(masked_features).float()
+    gammas = (gammas > 0).float()
+    gammas = gammas.unsqueeze(0).unsqueeze(-1)
+    weight_hat = (gammas * weight_original.view(weight_original.shape[0], weight_original.shape[1], -1)).view_as(weight_original)
+
+    return nn.Parameter(weight_hat)
+
+def compress_once(keep_ratio):
+    compressed_modules = copy.deepcopy(modules)
+    budget_per_layer = [(module.weight != 0.0).sum().item() for module in compressed_modules]
+    print(budget_per_layer)
+
+    budget_total = int(keep_ratio * original_size)
+    budget_available = budget_total - uncompressible_size
+
+    budget_available = min(budget_available, compressible_size)
+    budget_available = max(0, budget_available)
+
+    eps_opt = find_opt_eps(budget_available)
+    print('------------------')
+    print(eps_opt, budget_available)
+    pruned_input_size, _ = get_layerwise_size_per_eps(eps_opt)
+
+    for ell in reversed(range(len(compressed_modules))):        
+        print(ell)
+        size_pruned = pruned_input_size[ell]
+        #print(size_pruned)
+        probs = sens_trackers[ell].probability
+        masked_features = prune(size_pruned, probs)
+        weight_hat = sparsify(masked_features, compressed_modules[ell].weight)
+        compressed_modules[ell].weight = weight_hat
+        if ell == 4:
+            print(weight_hat)
+    compressed_size = get_original_size(compressed_modules)
+    budget_per_layer = [(module.weight != 0.0).sum().item() for module in compressed_modules]
+    print(budget_per_layer)
+
+    
+
+    return compressed_size
+
+print(compress_once(0.5))
+
+#kr_actual = (compress_once(0.5) / original_size)
+#kr_diff = kr_actual - keep_ratio
+#print("Current diff in keep ratio is: ", kr_diff)
+
+# def compress(keep_ratio):
         
 #     #kr_current = self.compressed_net.size() / self.original_net[0].size()
 #     kr_min = 0.4 * keep_ratio
