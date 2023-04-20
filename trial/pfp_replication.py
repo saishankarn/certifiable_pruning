@@ -426,9 +426,13 @@ def compress_once(keep_ratio):
         #print(size_pruned)
         probs = sens_trackers[ell].probability
         masked_features = prune(size_pruned, probs)
-        print(compressed_modules[ell].bias.shape, compressed_modules[ell].weight.shape, pruned_output_size[ell])
+        # print(compressed_modules[ell].bias.shape, compressed_modules[ell].weight.shape, pruned_output_size[ell])
         weight_hat = sparsify(masked_features, compressed_modules[ell].weight)
         compressed_modules[ell].weight = weight_hat
+        
+        if ell > 0:
+            compressed_modules[ell-1].bias = nn.Parameter(torch.mul(compressed_modules[ell-1].bias, masked_features))
+            print(compressed_modules[ell-1].bias.shape, masked_features.shape)
 
     compressed_size = get_original_size(compressed_modules)
     budget_per_layer = [(module.weight != 0.0).sum().item() for module in compressed_modules]
