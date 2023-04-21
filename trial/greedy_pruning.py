@@ -521,7 +521,7 @@ def get_dataset(dset_name, batch_size, n_worker, data_root, skip = 1):
 
 
 # Load the CIFAR-10 dataset
-trainloader, eval_train_loader, val_loader, n_class = get_dataset('cifar10', 128, 1, data_root='dataroot', skip=200)
+trainloader, eval_train_loader, val_loader, n_class = get_dataset('cifar10', 128, 1, data_root='../../Network-Pruning-Greedy-Forward-Selection/dataroot', skip=200)
 
 # Instantiate the AlexNet model and move it to the GPU if available
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -593,7 +593,7 @@ def test_with_data(net, data):
 
 
 
-model_path = 'checkpoints/alexnet_cifar10.pth'
+model_path = '../../checkpoints/alexnet_cifar10.pth'
 if os.path.isfile(model_path):
     checkpt = torch.load(model_path)
     net.load_state_dict(checkpt)
