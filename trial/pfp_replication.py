@@ -186,6 +186,19 @@ def get_compressible_layers(modules):
 
     return compressible_layers, num_weights
 
+class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
+
+    def forward(self, input, target):
+        if isinstance(input, dict):
+            loss = super().forward(input["out"], target)
+            if "aux" in input:
+                loss += 0.5 * super().forward(input["aux"], target)
+        else:
+            loss = super().forward(input, target)
+        return loss
+
+loss_handle = CrossEntropyLossWithAuxiliary()
+
 original_size = get_original_size(modules) # contains the number of non-zero parameters
 compressible_layers, num_weights = get_compressible_layers(modules) 
 compressible_size = get_compressible_size(modules) # contains the number of non-zero parameters belonging to the weight and the bias is excluded
@@ -406,6 +419,72 @@ def sparsify(masked_features, weight_original):
 
     return nn.Parameter(weight_hat)
 
+def get_dummy_net(compressed_modules):
+    compressed_net = LeNet5(num_classes=10, num_in_channels=1)
+    compressed_net.conv1 = compressed_modules[0]
+    compressed_net.conv2 = compressed_modules[1]
+    compressed_net.fc1 = compressed_modules[2]
+    compressed_net.fc2 = compressed_modules[3]
+    compressed_net.fc3 = compressed_modules[4]
+    
+    return compressed_net
+
+def propagate_compression(pruned_net):
+    def zero_grad(net):
+        for param in net.parameters():
+            param.grad = None
+
+    def parameters_for_grad_prune(pruned_net):
+        pruned_net_modules = [module for module in pruned_net.modules() \
+               if module != pruned_net and isinstance(module, nn.Module)]
+        for module in pruned_net_modules:
+            if module != net and isinstance(module, nn.Module):
+                yield module.weight
+
+    def get_prune_mask_from_grad(grad):
+        out_is_const = grad.view(grad.shape[0], -1).abs().sum(-1) == 0.0
+        mask = out_is_const.view((-1,) + (1,) * (grad.dim() - 1))
+        return mask
+    
+    zero_grad(pruned_net)
+
+
+    pruned_net.eval()
+    device = modules[0].weight.device
+
+    at_least_one_batch = False
+    with torch.enable_grad():
+        for images, targets in loader_s:
+            if len(images) < 2:
+                continue
+            at_least_one_batch = True
+            images = tensor.to(images, device, non_blocking=True)
+            targets = tensor.to(targets, device, non_blocking=True)
+            outs = pruned_net(images)
+            loss = loss_handle(outs, targets)
+            loss.backward()
+
+    # post-process gradients to set respective weights to zero
+    some_grad_none = False
+    with torch.no_grad():
+        for param in parameters_for_grad_prune(pruned_net):
+            grad = param.grad
+            if grad is None:
+                some_grad_none = True
+                continue
+            # mask anything at machine precision or below.
+            prune_mask = get_prune_mask_from_grad(grad)
+            param.masked_fill_(prune_mask, 0.0)
+
+    # issue warning in case some gradients were None
+    if some_grad_none:
+        print("Some parameters did not received gradients"
+              " while propagating compression!")
+
+    zero_grad(pruned_net)
+
+    return pruned_net
+
 def compress_once(keep_ratio):
     compressed_modules = copy.deepcopy(modules)
     budget_per_layer = [(module.weight != 0.0).sum().item() for module in compressed_modules]
@@ -421,8 +500,6 @@ def compress_once(keep_ratio):
     pruned_input_size, pruned_output_size = get_layerwise_size_per_eps(eps_opt)
     #print(pruned_input_size, pruned_output_size)
 
-
-
     # left_inp_features = {ell:[] for ell in range(len(compressed_modules))}
     for ell in reversed(range(len(compressed_modules))):
         module = compressed_modules[ell]
@@ -435,145 +512,96 @@ def compress_once(keep_ratio):
         size_pruned = pruned_input_size[ell]
 
         masked_features = prune(size_pruned, probs)
-
-
-        # deterministic - taking the top "size pruned" number of neurons.
-        # weight_mask = torch.zeros_like(module.weight)
-        # module.weight = nn.Parameter(torch.mul(module.weight, weight_mask))
-        # idx_top = np.argpartition(probs, -size_pruned)[-size_pruned:]
-        # if isinstance(module, nn.Conv2d):
-        #     weight_mask[:, idx_top, :, :] = 1.0
-        # if isinstance(module, nn.Linear):
-        #     weight_mask[:, idx_top] = 1.0
-
-        # left_inp_features[ell] = idx_top
-
-
-
-    # for ell in range(len(compressed_modules)-1):
-    #     current_module = compressed_modules[ell]
-    #     next_module = compressed_modules[ell+1]
-    #     if isinstance(current_module, nn.Conv2d) and isinstance(next_module, nn.Linear):
-    #         bias_mask = torch.ones_like(current_module.bias)
-    #     else:
-    #         idx_top = left_inp_features[ell+1]
-    #         bias_mask = torch.zeros_like(current_module.bias)
-    #         bias_mask[idx_top] = 1.0
-
-    #     current_module.bias = nn.Parameter(torch.mul(current_module.bias, bias_mask))
+        weight_hat = sparsify(masked_features, module.weight)
+        module.weight.data = weight_hat
         
-    #     # print(compressed_modules[ell].bias)
-    #     # print(current_module.bias)
-    #     # print("--------------")
-    #     # print(current_module.weight.shape)
-    #     # print(current_module.bias.shape)
-    #     # print(bias_mask)
-    #     # print(torch.sort(left_inp_features[ell+1])[0])
-    #     # print(torch.where(bias_mask)[0])
+    compressed_net = get_dummy_net(compressed_modules)
+    compressed_net = propagate_compression(compressed_net)
+    compressed_net_modules = [module for module in compressed_net.modules() \
+               if module != compressed_net and isinstance(module, nn.Module)]
+    compressed_net_size = get_original_size(compressed_net_modules)
 
-        
-    # compressed_net = get_dummy_net(compressed_modules)
-    # compressed_net_modules = [module for module in compressed_net.modules() \
-    #            if module != compressed_net and isinstance(module, nn.Module)]
-    # compressed_net_size = get_original_size(compressed_net_modules)
-
-    # # print("achieved compression : ", compressed_net_size/original_size)
-    # return compressed_net_size
+    print("achieved compression : ", compressed_net_size/original_size)
+    return compressed_net_size
 
 compress_once(0.5)
 
-# def get_dummy_net(compressed_modules):
-#     compressed_net = LeNet5(num_classes=10, num_in_channels=1)
-#     compressed_net.conv1 = compressed_modules[0]
-#     compressed_net.conv2 = compressed_modules[1]
-#     compressed_net.fc1 = compressed_modules[2]
-#     compressed_net.fc2 = compressed_modules[3]
-#     compressed_net.fc3 = compressed_modules[4]
-    
-#     return compressed_net
 
 
-# def compress(keep_ratio):
-#     kr_min = 0.4 * keep_ratio
-#     kr_max = max(keep_ratio, 0.999 * 1.0)
-#     f_opt_lookup = {}
 
-#     def _f_opt(kr_compress):
-#         if kr_compress in f_opt_lookup:
-#             return f_opt_lookup[kr_compress]
+def compress(keep_ratio):
+    kr_min = 0.4 * keep_ratio
+    kr_max = max(keep_ratio, 0.999 * 1.0)
+    f_opt_lookup = {}
+
+    def _f_opt(kr_compress):
+        if kr_compress in f_opt_lookup:
+            return f_opt_lookup[kr_compress]
         
-#         compressed_net_size = compress_once(kr_compress)
-#         kr_actual = compressed_net_size / original_size
-#         kr_diff = kr_actual - keep_ratio
+        compressed_net_size = compress_once(kr_compress)
+        kr_actual = compressed_net_size / original_size
+        kr_diff = kr_actual - keep_ratio
 
-#         print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
+        print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
         
-#         if abs(kr_diff) < 0.005 * keep_ratio:
-#             kr_diff = 0.0
+        if abs(kr_diff) < 0.005 * keep_ratio:
+            kr_diff = 0.0
     
-#         f_opt_lookup[kr_compress] = kr_diff
-#         return f_opt_lookup[kr_compress]
+        f_opt_lookup[kr_compress] = kr_diff
+        return f_opt_lookup[kr_compress]
     
-#     try:
-#         kr_diff_nominal = _f_opt(keep_ratio)
-#         if kr_diff_nominal == 0.0:
-#             return 0
-#         elif kr_diff_nominal > 0.0:
-#             kr_max = keep_ratio
-#         else:
-#             kr_min = keep_ratio
-#     except (ValueError, RuntimeError):
-#         pass
-#     try:
-#         kr_opt = optimize.brentq(
-#             lambda kr: _f_opt(kr),
-#             kr_min,
-#             kr_max,
-#             maxiter=20,
-#             xtol=5e-3,
-#             rtol=5e-3,
-#             disp=True,
-#         )
-#     except (ValueError, RuntimeError):
-#         kr_diff_opt = float("inf")
-#         kr_opt = None
-#         for kr_compress in f_opt_lookup.items():
-#             kr_diff = f_opt_lookup[kr_diff]
-#             if abs(kr_diff) < abs(kr_diff_opt):
-#                 kr_diff_opt = kr_diff
-#                 kr_opt = kr_compress
-#         print(
-#             "Cannot approximate keep ratio. "
-#             f"Picking best available keep ratio {kr_opt * 100.0:.2f}% "
-#             f"with actual diff {kr_diff_opt * 100.0:.2f}%."
-#         )
+    try:
+        kr_diff_nominal = _f_opt(keep_ratio)
+        if kr_diff_nominal == 0.0:
+            return 0
+        elif kr_diff_nominal > 0.0:
+            kr_max = keep_ratio
+        else:
+            kr_min = keep_ratio
+    except (ValueError, RuntimeError):
+        pass
+    try:
+        kr_opt = optimize.brentq(
+            lambda kr: _f_opt(kr),
+            kr_min,
+            kr_max,
+            maxiter=20,
+            xtol=5e-3,
+            rtol=5e-3,
+            disp=True,
+        )
+    except (ValueError, RuntimeError):
+        kr_diff_opt = float("inf")
+        kr_opt = None
+        for kr_compress in f_opt_lookup.items():
+            kr_diff = f_opt_lookup[kr_diff]
+            if abs(kr_diff) < abs(kr_diff_opt):
+                kr_diff_opt = kr_diff
+                kr_opt = kr_compress
+        print(
+            "Cannot approximate keep ratio. "
+            f"Picking best available keep ratio {kr_opt * 100.0:.2f}% "
+            f"with actual diff {kr_diff_opt * 100.0:.2f}%."
+        )
 
-#     return compress_once(kr_opt)
+    return compress_once(kr_opt)
 
-# compress(0.5)
+compress(0.5)
 
 
-# class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
 
-#     def forward(self, input, target):
-#         if isinstance(input, dict):
-#             loss = super().forward(input["out"], target)
-#             if "aux" in input:
-#                 loss += 0.5 * super().forward(input["aux"], target)
-#         else:
-#             loss = super().forward(input, target)
-#         return loss
 
-# # get a loss handle
-# loss_handle = CrossEntropyLossWithAuxiliary()
 
-# net = tp.util.net.NetHandle(net, name)
-# net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-# print(
-#     f"The network has {net_filter_pruned.size()} parameters and "
-#     f"{net_filter_pruned.flops()} FLOPs left."
-# )
-# #net_filter_pruned.cuda()
-# net_filter_pruned.compress(keep_ratio=0.5)
-# #net_filter_pruned.cpu()
+    
+
+
+net = tp.util.net.NetHandle(net, name)
+net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
+print(
+    f"The network has {net_filter_pruned.size()} parameters and "
+    f"{net_filter_pruned.flops()} FLOPs left."
+)
+#net_filter_pruned.cuda()
+net_filter_pruned.compress(keep_ratio=0.5)
+#net_filter_pruned.cpu()
 
