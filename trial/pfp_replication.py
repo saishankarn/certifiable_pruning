@@ -345,7 +345,7 @@ def get_layerwise_size_per_eps(eps):
         if in_features < 1:
             in_features = 1
 
-        total_in_features.append(in_features)
+        total_in_features.append(int(in_features.data.numpy()))
         in_feat_reduction.append(get_num_features(weight, 1) - in_features)
 
     total_out_features = []
@@ -359,7 +359,7 @@ def get_layerwise_size_per_eps(eps):
             out_features -= float(sub) 
         if out_features < 1:
             out_features = 1
-        total_out_features.append(out_features)
+        total_out_features.append(int(out_features))
     
     return total_in_features, total_out_features
 
@@ -391,7 +391,7 @@ now let's compress
 def prune(size_pruned, probs):
     mask = torch.zeros_like(probs, dtype=torch.bool)
     if size_pruned > 0:
-        size_pruned = int(size_pruned.cpu().numpy())
+        size_pruned = int(size_pruned)
         idx_top = np.argpartition(probs.view(-1).cpu().numpy(), -size_pruned)[-size_pruned:]
         mask.view(-1)[idx_top] = True
     masked_features = mask.view(mask.shape[0], -1).sum(dim=-1)
@@ -409,7 +409,7 @@ def sparsify(masked_features, weight_original):
 def compress_once(keep_ratio):
     compressed_modules = copy.deepcopy(modules)
     budget_per_layer = [(module.weight != 0.0).sum().item() for module in compressed_modules]
-    print(budget_per_layer)
+    #print(budget_per_layer)
 
     budget_total = int(keep_ratio * original_size)
     budget_available = budget_total - uncompressible_size
@@ -419,71 +419,114 @@ def compress_once(keep_ratio):
 
     eps_opt = find_opt_eps(budget_available)
     pruned_input_size, pruned_output_size = get_layerwise_size_per_eps(eps_opt)
+    #print(pruned_input_size, pruned_output_size)
 
-    for ell in reversed(range(len(compressed_modules))):        
-        print(ell)
+
+
+    # left_inp_features = {ell:[] for ell in range(len(compressed_modules))}
+    for ell in reversed(range(len(compressed_modules))):
+        module = compressed_modules[ell]
+        #print(module.weight.shape)
+        #print(module.bias.shape)
+        tracker = sens_trackers[ell]
+        sens_in = tracker.sensitivity_in
+        sum_sens = sens_in.sum().view(-1)
+        probs = sens_in / sum_sens
         size_pruned = pruned_input_size[ell]
-        #print(size_pruned)
-        probs = sens_trackers[ell].probability
+
         masked_features = prune(size_pruned, probs)
-        # print(compressed_modules[ell].bias.shape, compressed_modules[ell].weight.shape, pruned_output_size[ell])
-        weight_hat = sparsify(masked_features, compressed_modules[ell].weight)
-        compressed_modules[ell].weight = weight_hat
+
+
+        # deterministic - taking the top "size pruned" number of neurons.
+        # weight_mask = torch.zeros_like(module.weight)
+        # module.weight = nn.Parameter(torch.mul(module.weight, weight_mask))
+        # idx_top = np.argpartition(probs, -size_pruned)[-size_pruned:]
+        # if isinstance(module, nn.Conv2d):
+        #     weight_mask[:, idx_top, :, :] = 1.0
+        # if isinstance(module, nn.Linear):
+        #     weight_mask[:, idx_top] = 1.0
+
+        # left_inp_features[ell] = idx_top
+
+
+
+    # for ell in range(len(compressed_modules)-1):
+    #     current_module = compressed_modules[ell]
+    #     next_module = compressed_modules[ell+1]
+    #     if isinstance(current_module, nn.Conv2d) and isinstance(next_module, nn.Linear):
+    #         bias_mask = torch.ones_like(current_module.bias)
+    #     else:
+    #         idx_top = left_inp_features[ell+1]
+    #         bias_mask = torch.zeros_like(current_module.bias)
+    #         bias_mask[idx_top] = 1.0
+
+    #     current_module.bias = nn.Parameter(torch.mul(current_module.bias, bias_mask))
         
-        if ell > 0:
-            compressed_modules[ell-1].bias = nn.Parameter(torch.mul(compressed_modules[ell-1].bias, masked_features))
-            print(compressed_modules[ell-1].bias.shape, masked_features.shape)
+    #     # print(compressed_modules[ell].bias)
+    #     # print(current_module.bias)
+    #     # print("--------------")
+    #     # print(current_module.weight.shape)
+    #     # print(current_module.bias.shape)
+    #     # print(bias_mask)
+    #     # print(torch.sort(left_inp_features[ell+1])[0])
+    #     # print(torch.where(bias_mask)[0])
 
-    compressed_size = get_original_size(compressed_modules)
-    budget_per_layer = [(module.weight != 0.0).sum().item() for module in compressed_modules]
+        
+    # compressed_net = get_dummy_net(compressed_modules)
+    # compressed_net_modules = [module for module in compressed_net.modules() \
+    #            if module != compressed_net and isinstance(module, nn.Module)]
+    # compressed_net_size = get_original_size(compressed_net_modules)
 
-    return compressed_size
+    # # print("achieved compression : ", compressed_net_size/original_size)
+    # return compressed_net_size
 
-print(compress_once(0.5))
+compress_once(0.5)
 
-#kr_actual = (compress_once(0.5) / original_size)
-#kr_diff = kr_actual - keep_ratio
-#print("Current diff in keep ratio is: ", kr_diff)
+# def get_dummy_net(compressed_modules):
+#     compressed_net = LeNet5(num_classes=10, num_in_channels=1)
+#     compressed_net.conv1 = compressed_modules[0]
+#     compressed_net.conv2 = compressed_modules[1]
+#     compressed_net.fc1 = compressed_modules[2]
+#     compressed_net.fc2 = compressed_modules[3]
+#     compressed_net.fc3 = compressed_modules[4]
+    
+#     return compressed_net
+
 
 # def compress(keep_ratio):
-        
-#     #kr_current = self.compressed_net.size() / self.original_net[0].size()
 #     kr_min = 0.4 * keep_ratio
 #     kr_max = max(keep_ratio, 0.999 * 1.0)
+#     f_opt_lookup = {}
 
 #     def _f_opt(kr_compress):
-#         b_per_layer = compress_once(kr_compress, backup_net)
-#         # check resulting keep ratio
-#         kr_actual = (
-#             self.compressed_net.size() / self.original_net[0].size()
-#         )
+#         if kr_compress in f_opt_lookup:
+#             return f_opt_lookup[kr_compress]
+        
+#         compressed_net_size = compress_once(kr_compress)
+#         kr_actual = compressed_net_size / original_size
 #         kr_diff = kr_actual - keep_ratio
+
 #         print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
-#         # set to zero if we are already close and stop
+        
 #         if abs(kr_diff) < 0.005 * keep_ratio:
 #             kr_diff = 0.0
-#         # store look-up
-#         f_opt_lookup[kr_compress] = (kr_diff, b_per_layer)
+    
+#         f_opt_lookup[kr_compress] = kr_diff
 #         return f_opt_lookup[kr_compress]
-#     # some times the keep ratio is pretty accurate
-#     # so let's try with the correct keep ratio first
+    
 #     try:
-#         # we can either run right away or update the boundaries for the
-#         # binary search to make it faster.
-#         kr_diff_nominal, b_per_layer = _f_opt(keep_ratio)
+#         kr_diff_nominal = _f_opt(keep_ratio)
 #         if kr_diff_nominal == 0.0:
-#             return b_per_layer
+#             return 0
 #         elif kr_diff_nominal > 0.0:
 #             kr_max = keep_ratio
 #         else:
 #             kr_min = keep_ratio
 #     except (ValueError, RuntimeError):
 #         pass
-#     # run the root search
-#     # if it fails we simply pick the best value from the look-up table
 #     try:
 #         kr_opt = optimize.brentq(
-#             lambda kr: _f_opt(kr)[0],
+#             lambda kr: _f_opt(kr),
 #             kr_min,
 #             kr_max,
 #             maxiter=20,
@@ -494,8 +537,8 @@ print(compress_once(0.5))
 #     except (ValueError, RuntimeError):
 #         kr_diff_opt = float("inf")
 #         kr_opt = None
-#         for kr_compress, kr_diff_b_per_layer in f_opt_lookup.items():
-#             kr_diff = kr_diff_b_per_layer[0]
+#         for kr_compress in f_opt_lookup.items():
+#             kr_diff = f_opt_lookup[kr_diff]
 #             if abs(kr_diff) < abs(kr_diff_opt):
 #                 kr_diff_opt = kr_diff
 #                 kr_opt = kr_compress
@@ -504,33 +547,33 @@ print(compress_once(0.5))
 #             f"Picking best available keep ratio {kr_opt * 100.0:.2f}% "
 #             f"with actual diff {kr_diff_opt * 100.0:.2f}%."
 #         )
-#     # now run the compression one final time
-#     return self._compress_once(kr_opt, backup_net)
+
+#     return compress_once(kr_opt)
+
+# compress(0.5)
 
 
+# class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
 
+#     def forward(self, input, target):
+#         if isinstance(input, dict):
+#             loss = super().forward(input["out"], target)
+#             if "aux" in input:
+#                 loss += 0.5 * super().forward(input["aux"], target)
+#         else:
+#             loss = super().forward(input, target)
+#         return loss
 
-class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
+# # get a loss handle
+# loss_handle = CrossEntropyLossWithAuxiliary()
 
-    def forward(self, input, target):
-        if isinstance(input, dict):
-            loss = super().forward(input["out"], target)
-            if "aux" in input:
-                loss += 0.5 * super().forward(input["aux"], target)
-        else:
-            loss = super().forward(input, target)
-        return loss
-
-# get a loss handle
-loss_handle = CrossEntropyLossWithAuxiliary()
-
-net = tp.util.net.NetHandle(net, name)
-net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-print(
-    f"The network has {net_filter_pruned.size()} parameters and "
-    f"{net_filter_pruned.flops()} FLOPs left."
-)
-#net_filter_pruned.cuda()
-net_filter_pruned.compress(keep_ratio=0.5)
-#net_filter_pruned.cpu()
+# net = tp.util.net.NetHandle(net, name)
+# net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
+# print(
+#     f"The network has {net_filter_pruned.size()} parameters and "
+#     f"{net_filter_pruned.flops()} FLOPs left."
+# )
+# #net_filter_pruned.cuda()
+# net_filter_pruned.compress(keep_ratio=0.5)
+# #net_filter_pruned.cpu()
 
