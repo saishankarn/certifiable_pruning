@@ -224,16 +224,10 @@ num_batches = len(loader_mini)
        
 for i_batch, (images, _) in enumerate(loader_mini):
     outputs = net.forward_mod(images)
-    #print(outputs[-1][-1])
-    #print(i_batch)
-    #print(images.shape)
     for ell in range(len(modules)):
         module = sens_trackers[ell].module
         #print(outputs[0][ell].shape, outputs[1][ell].shape)
         sens_trackers[ell]._hook(module, (outputs[0][ell],), outputs[1][ell]) 
-
-#for ell in range(len(modules)):
-#    print(sens_trackers[ell].sensitivity_in)
 
 """
 obtaining the probability
@@ -294,8 +288,6 @@ def get_resulting_layer_budget(eps):
     #print(m_budget)
     return resulting_layer_budget
 
-#print(get_resulting_layer_budget(1e+150))
-
 def get_resulting_size_per_eps(eps):
     
     layerwise_budget = get_resulting_layer_budget(eps)
@@ -338,8 +330,6 @@ def get_resulting_size_per_eps(eps):
         #print(out_features, in_features, k_size)
     return resulting_size
 
-#print(get_resulting_size_per_eps(1e+150))
-#print(original_size)
 
 def get_layerwise_size_per_eps(eps):
     
@@ -394,8 +384,6 @@ def find_opt_eps(budget):
     eps_opt = optimize.brentq(f_opt, eps_min, eps_max, maxiter=1000, xtol=10e-250, disp=False)
         
     return eps_opt
-
-#find_opt_eps(int(original_size*keep_ratio))
 
 """
 now let's compress
@@ -522,9 +510,9 @@ def compress_once(keep_ratio):
     compressed_net_size = get_original_size(compressed_net_modules)
 
     print("achieved compression : ", compressed_net_size/original_size)
-    return compressed_net_size
+    return compressed_net_size, compressed_net
 
-compress_once(0.5)
+# compress_once(0.5)
 
 
 
@@ -538,13 +526,13 @@ def compress(keep_ratio):
         if kr_compress in f_opt_lookup:
             return f_opt_lookup[kr_compress]
         
-        compressed_net_size = compress_once(kr_compress)
+        compressed_net_size = compress_once(kr_compress)[0]
         kr_actual = compressed_net_size / original_size
         kr_diff = kr_actual - keep_ratio
 
         print(f"Current diff in keep ratio is: {kr_diff * 100.0:.2f}%")
         
-        if abs(kr_diff) < 0.005 * keep_ratio:
+        if abs(kr_diff) < 0.0005 * keep_ratio:
             kr_diff = 0.0
     
         f_opt_lookup[kr_compress] = kr_diff
@@ -584,24 +572,36 @@ def compress(keep_ratio):
             f"with actual diff {kr_diff_opt * 100.0:.2f}%."
         )
 
-    return compress_once(kr_opt)
+    return compress_once(kr_opt)[1]
 
-compress(0.5)
+final_compressed_net = compress(0.5)
 
+# Evaluate the model on the test set
 
+correct = 0
+total = 0
+with torch.no_grad():
+    for data in loader_test:
+        inputs, labels = data
+        outputs = final_compressed_net(inputs)
+        _, predicted = outputs.max(1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
+
+print('Accuracy on test set: %.2f %%' % (100 * correct / total))
 
 
 
     
 
 
-net = tp.util.net.NetHandle(net, name)
-net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-print(
-    f"The network has {net_filter_pruned.size()} parameters and "
-    f"{net_filter_pruned.flops()} FLOPs left."
-)
-#net_filter_pruned.cuda()
-net_filter_pruned.compress(keep_ratio=0.5)
-#net_filter_pruned.cpu()
+# net = tp.util.net.NetHandle(net, name)
+# net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
+# print(
+#     f"The network has {net_filter_pruned.size()} parameters and "
+#     f"{net_filter_pruned.flops()} FLOPs left."
+# )
+# #net_filter_pruned.cuda()
+# net_filter_pruned.compress(keep_ratio=0.5)
+# #net_filter_pruned.cpu()
 
