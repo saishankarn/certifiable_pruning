@@ -116,13 +116,6 @@ class Mask(nn.Module):
         self.prune_lsearch.data = 0. * self.prune_lsearch.data
         self.prune_gamma.data = 0. * self.prune_gamma.data
 
-    # def assign_alpha(self, alpha):
-    #     self.prune_a.data = 0. * self.prune_a.data
-    #     self.prune_a.data += alpha
-    #     self.prune_w.data = 0. * self.prune_w.data
-    #     self.prune_lsearch.data = 0. * self.prune_lsearch.data
-    #     self.prune_gamma.data = 0. * self.prune_gamma.data
-
 
 class AlexNet(nn.Module):
     def __init__(self, num_classes=10):
@@ -165,18 +158,18 @@ class AlexNet_prescreen(nn.Module):
         self.features = nn.Sequential(
             net.features[0],
             net.features[1],
-            Mask(D_in = net.features[0].weight.shape[0], layer_num = 0),
+            #Mask(D_in = net.features[0].weight.shape[0], layer_num = 0),
             net.features[2],
             net.features[3],
             net.features[4],
-            Mask(D_in = net.features[3].weight.shape[0], layer_num = 1),
+            Mask(D_in = net.features[3].weight.shape[0], layer_num = 0),
             net.features[5],
             net.features[6],
             net.features[7],
-            Mask(D_in = net.features[6].weight.shape[0], layer_num = 2),
+            Mask(D_in = net.features[6].weight.shape[0], layer_num = 1),
             net.features[8],
             net.features[9],
-            Mask(D_in = net.features[8].weight.shape[0], layer_num = 3),
+            Mask(D_in = net.features[8].weight.shape[0], layer_num = 2),
             net.features[10],
             net.features[11],
             Mask(D_in = net.features[10].weight.shape[0], layer_num = 3),
@@ -184,8 +177,9 @@ class AlexNet_prescreen(nn.Module):
         )
         self.classifier = net.classifier
 
-        self.mask_features = [2,6,10,13,16]
-        self.conv_features = [0,4,8,11,14]
+        self.mask_features = [5,9,12,15]
+        self.conv_features = [0,3,7,10,13]
+        self.masked_conv_features = [3,7,10,13]
         # self.pool_features = 
         # self.relu_features = 
 
@@ -320,7 +314,7 @@ def prune_a_layer(m):
 
 
     print("This layer's Neuron", cur_neuron)
-    pruned_accuracy = test_with_data(masked_net, validation_data)
+    pruned_accuracy = test(masked_net, val_loader)
     print("Accuracy : ", pruned_accuracy)
 
     a_para = m.prune_a.data
@@ -346,7 +340,7 @@ def net_prune(masked_net):
     for block_idx, block in enumerate(masked_net.features):
         print("pruning layer number : ", block_idx)
         mask_count = -1
-        if isinstance(block, Mask) and block_idx != 2:
+        if isinstance(block, Mask):
             #print(m)
             num_layer += 1
             isalladd = 0
@@ -358,9 +352,9 @@ def net_prune(masked_net):
             cur_neuron=a_num
             mb2_prune_ratio(masked_net)
 
-    fullflops, pruneflops, fullparams, pruneparams = mb2_prune_ratio(masked_net)
-    print("Full Flops, Prune Flops, Full Params, Prune Params")
-    print(fullflops, pruneflops, fullparams, pruneparams)
+    #fullflops, pruneflops, fullparams, pruneparams = mb2_prune_ratio(masked_net)
+    #print("Full Flops, Prune Flops, Full Params, Prune Params")
+    #print(fullflops, pruneflops, fullparams, pruneparams)
 
 
     return masked_net
@@ -403,11 +397,14 @@ class tem_AlexNet(nn.Module):
 
         self.features = []
         mask_idx = 0
-        for m in net.features:
+        for u, m in enumerate(net.features):
             if isinstance(m, nn.Conv2d):
-                mask = net.features[net.mask_features[mask_idx]]
-                mask_idx += 1
-                m, inp_channels = get_pruned_conv(m, mask, inp_channels)
+                if u in net.masked_conv_features:
+                    mask = net.features[net.mask_features[mask_idx]]
+                    mask_idx += 1
+                    m, inp_channels = get_pruned_conv(m, mask, inp_channels)
+                else:
+                    inp_channels = m.weight.shape[0]
             #elif isinstance(m, nn.ReLU):
 
             #elif isinstance(m, nn.MaxPool2d):
@@ -588,10 +585,11 @@ for eps_idx in range(len(epsilon_vals)):
     masked_net.eval()
     masked_net = net_prune(masked_net)
     acc = test(masked_net, val_loader)
-    _, _, full_params, prune_params = mb2_prune_ratio(masked_net)
-    pr = prune_params / full_params
-    pr_vals.append(pr)
-    acc_vals.append(acc)
+    print(acc)
+    #_, _, full_params, prune_params = mb2_prune_ratio(masked_net)
+    #pr = prune_params / full_params
+    #pr_vals.append(pr)
+    #acc_vals.append(acc)
 
 print(pr_vals)
 print(acc_vals)

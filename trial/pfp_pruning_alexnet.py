@@ -12,100 +12,188 @@ import torchprune as tp
 from torchprune.method.pfp.pfp_tracker import PFPTracker
 from torchprune.util import tensor
 from scipy import optimize
+from torch.utils.data import SubsetRandomSampler
 
 from get_sensitivity import * 
-
+import matplotlib.pyplot as plt
 """
 network architecture
 """
-
-class LeNet5(nn.Module):
-    def __init__(self, num_classes, num_in_channels):
-        super(LeNet5, self).__init__()
-        self.conv1 = nn.Conv2d(num_in_channels, 6, 5)  # Convolutional Layer 1: input channels=1, output channels=6, kernel size=5x5
-        self.conv2 = nn.Conv2d(6, 16, 5) # Convolutional Layer 2: input channels=6, output channels=16, kernel size=5x5
-        self.fc1 = nn.Linear(16 * 4 * 4, 120) # Fully Connected Layer 1: input features=16*4*4 (output size of conv2), output features=120
-        self.fc2 = nn.Linear(120, 84) # Fully Connected Layer 2: input features=120, output features=84
-        self.fc3 = nn.Linear(84, num_classes) # Fully Connected Layer 3 (Output Layer): input features=84, output features=10 (number of classes in MNIST)
+class AlexNet(nn.Module):
+    def __init__(self, num_classes=10):
+        super(AlexNet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(64, 192, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(192, 384, kernel_size=3, padding=1)
+        self.conv4 = nn.Conv2d(384, 256, kernel_size=3, padding=1)
+        self.conv5 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(256 * 2 * 2, 4096)
+        self.fc2 = nn.Linear(4096, 4096)
+        self.fc3 = nn.Linear(4096, num_classes)
 
     def forward(self, x):
         in_0 = x
-        out_0 = self.conv1(in_0) # Apply Convolutional Layer 1 and ReLU activation
-        #print(in_0.shape, out_0.shape)
+        out_0 = self.conv1(in_0)
+        
         in_1 = F.relu(out_0)
-        in_1 = F.max_pool2d(in_1, 2) # Apply Max Pooling Layer 1
-        out_1 = self.conv2(in_1) # Apply Convolutional Layer 2 and ReLU activation
-        #print(in_1.shape, out_1.shape)
-        in_2 = F.relu(out_1)
-        in_2 = F.max_pool2d(in_2, 2) # Apply Max Pooling Layer 2
-        in_2 = in_2.view(-1, 16 * 4 * 4) # Flatten the feature maps
-        out_2 = self.fc1(in_2) # Apply Fully Connected Layer 1 and ReLU activation
-        #print(in_2.shape, out_2.shape)
-        in_3 = F.relu(out_2)
-        out_3 = self.fc2(in_3) # Apply Fully Connected Layer 2 and ReLU activation
-        #print(in_3.shape, out_3.shape)
-        in_4 = F.relu(out_3)
-        out_4 = self.fc3(in_4) # Apply Fully Connected Layer 3 (Output Layer)
-        #print(in_4.shape, out_4.shape)
-        return out_4
+        in_1 = F.max_pool2d(in_1, 2)
+        out_1 = self.conv2(in_1)
 
+        in_2 = F.relu(out_1)
+        in_2 = F.max_pool2d(in_2, 2)
+        out_2 = self.conv3(in_2)
+        
+        in_3 = F.relu(out_2)
+        out_3 = self.conv4(in_3)
+        
+        in_4 = F.relu(out_3)
+        out_4 = self.conv5(in_4)
+        
+        in_5 = F.relu(out_4)
+        in_5 = F.max_pool2d(in_5, 2)
+        in_5 = in_5.view(in_5.size(0), 256*2*2)
+        out_5 = self.fc1(in_5)
+
+        in_6 = F.relu(out_5)
+        out_6 = self.fc2(in_6)
+
+        in_7 = F.relu(out_6)
+        out_7 = self.fc3(in_7)
+
+        return out_7
+    
     def forward_mod(self, x):
-        in_0 = x 
-        out_0 = self.conv1(in_0) # Apply Convolutional Layer 1 and ReLU activation
-        #print(in_0.shape, out_0.shape)
+        in_0 = x
+        out_0 = self.conv1(in_0)
+        
         in_1 = F.relu(out_0)
-        in_1 = F.max_pool2d(in_1, 2) # Apply Max Pooling Layer 1
-        out_1 = self.conv2(in_1) # Apply Convolutional Layer 2 and ReLU activation
-        #print(in_1.shape, out_1.shape)
-        in_2 = F.relu(out_1)
-        in_2 = F.max_pool2d(in_2, 2) # Apply Max Pooling Layer 2
-        in_2 = in_2.view(-1, 16 * 4 * 4) # Flatten the feature maps
-        out_2 = self.fc1(in_2) # Apply Fully Connected Layer 1 and ReLU activation
-        #print(in_2.shape, out_2.shape)
-        in_3 = F.relu(out_2)
-        out_3 = self.fc2(in_3) # Apply Fully Connected Layer 2 and ReLU activation
-        #print(in_3.shape, out_3.shape)
-        in_4 = F.relu(out_3)
-        out_4 = self.fc3(in_4) # Apply Fully Connected Layer 3 (Output Layer)
-        #print(in_4.shape, out_4.shape)
-        return [(in_0, in_1, in_2, in_3, in_4), (out_0, out_1, out_2, out_3, out_4)]
+        in_1 = F.max_pool2d(in_1, 2)
+        out_1 = self.conv2(in_1)
 
-name = 'lenet5_mnist'
-net = LeNet5(num_classes=10, num_in_channels=1)
+        in_2 = F.relu(out_1)
+        in_2 = F.max_pool2d(in_2, 2)
+        out_2 = self.conv3(in_2)
+        
+        in_3 = F.relu(out_2)
+        out_3 = self.conv4(in_3)
+        
+        in_4 = F.relu(out_3)
+        out_4 = self.conv5(in_4)
+        
+        in_5 = F.relu(out_4)
+        in_5 = F.max_pool2d(in_5, 2)
+        in_5 = in_5.view(in_5.size(0), 256*2*2)
+        out_5 = self.fc1(in_5)
+
+        in_6 = F.relu(out_5)
+        out_6 = self.fc2(in_6)
+
+        in_7 = F.relu(out_6)
+        out_7 = self.fc3(in_7)
+
+        return [(in_0, in_1, in_2, in_3, in_4, in_5, in_6, in_7), \
+                (out_0, out_1, out_2, out_3, out_4, out_5, out_6, out_7)]
+
 
 """
 data loader
 """
 
-transform = torchvision.transforms.Compose(
-    [torchvision.transforms.ToTensor(),
-     torchvision.transforms.Normalize((0.5,), (0.5,))])
-
-trainset = torchvision.datasets.MNIST(root='./data', train=True,
-                                      download=True, transform=transform)
-
-testset = torchvision.datasets.MNIST(root='./data', train=False,
-                                     download=True, transform=transform)
-
 size_s = 128
 batch_size = 128
-testset, set_s = torch.utils.data.random_split(
-    testset, [len(testset) - size_s, size_s]
-)
 
-loader_s = torch.utils.data.DataLoader(set_s, batch_size=32, shuffle=False)
-loader_test = torch.utils.data.DataLoader(
-    testset, batch_size=batch_size, shuffle=False
-)
-loader_train = torch.utils.data.DataLoader(
-    trainset, batch_size=batch_size, shuffle=False
-)
+def get_dataset(dset_name, batch_size, n_worker, data_root, skip = 1):
+    cifar_tran_train = [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ]
+    cifar_tran_test = [
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ]
+    
+    print('=> Preparing data..')
+    transform_train = transforms.Compose(cifar_tran_train)
+    transform_test = transforms.Compose(cifar_tran_test)
+    trainset = torchvision.datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform_train)
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True,
+                                               num_workers=n_worker, pin_memory=True, sampler=None)
+    
+
+    testset = torchvision.datasets.CIFAR10(root=data_root, train=False, download=True, transform=transform_test)
+    val_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False,
+                                             num_workers=n_worker, pin_memory=True)
+    n_class = 10
+
+    testset, set_s = torch.utils.data.random_split(testset, [len(testset) - size_s, size_s])
+
+    loader_s = torch.utils.data.DataLoader(set_s, batch_size=32, shuffle=False)
+
+    return train_loader, loader_s, val_loader, n_class
+
+
+
+# Load the CIFAR-10 dataset
+loader_train, loader_s, loader_test, n_class = get_dataset('cifar10', 128, 1, data_root='../../Network-Pruning-Greedy-Forward-Selection/dataroot', skip=200)
+
+
 
 """
-Train the model
+Define and train the model
 """
 
-model_path = 'checkpoints/' + name + '.pth'
+def train(net):
+    for epoch in range(10):
+        running_loss = 0.0
+        for i, data in enumerate(loader_train, 0):
+            # Get the inputs and move them to the GPU if available
+            inputs, labels = data
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+
+            # Forward + backward + optimize
+            outputs = net(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            # Print statistics
+            running_loss += loss.item()
+            if i % 100 == 99:    # Print every 100 mini-batches
+                print('[%d, %5d] loss: %.3f' %
+                      (epoch + 1, i + 1, running_loss / 100))
+                running_loss = 0.0
+
+    print('Finished Training')
+
+    torch.save(net.state_dict(), model_path)
+
+    return net
+
+def test(net_, loader):
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for i, data in enumerate(loader, 0):
+            print(i)
+            images, labels = data
+            images, labels = images.to(device), labels.to(device)
+            outputs = net_(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    return 1-correct/total
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+name = 'alexnet_cifar_pfp'
+net = AlexNet(num_classes=10).to(device)
+
+model_path = '../checkpoints/' + name + '.pth'
 if os.path.isfile(model_path):
     checkpt = torch.load(model_path)
     net.load_state_dict(checkpt)
@@ -113,42 +201,12 @@ if os.path.isfile(model_path):
 else:
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
-
-    for epoch in range(10):  # Loop over the dataset multiple times
-        running_loss = 0.0
-        for i, data in enumerate(loader_train, 0):
-            inputs, labels = data
-
-            optimizer.zero_grad()
-
-            # Forward pass
-            outputs = net(inputs)[-1][-1]
-            loss = criterion(outputs, labels)
-
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item()
-
-        print('Epoch [%d], Loss: %.4f' % (epoch + 1, running_loss / (i + 1)))
-
+    net = train(net)
     print('Finished training')
     torch.save(net.state_dict(), model_path)
 
-# Evaluate the model on the test set
-
-correct = 0
-total = 0
-with torch.no_grad():
-    for data in loader_test:
-        inputs, labels = data
-        outputs = net(inputs)
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-
-print('Accuracy on test set: %.2f %%' % (100 * correct / total))
+accuracy = test(net, loader_test)
+print('Accuracy of the network on the 10000 test images: %.2f %%' % accuracy)
 
 backup_net = copy.deepcopy(net)
 
@@ -156,8 +214,9 @@ backup_net = copy.deepcopy(net)
 Let's start with Provable Filter Pruning
 Some basic definitions and declarations first
 """
-modules = [module for module in net.modules() if module != net and isinstance(module, nn.Module)]
-sens_trackers = nn.ModuleList()
+# modules = [module for module in net.modules() if module != net and isinstance(module, nn.Module)]
+
+# sens_trackers = nn.ModuleList()
 
 def get_original_size(modules):
     nonzeros = 0
@@ -197,51 +256,6 @@ class CrossEntropyLossWithAuxiliary(nn.CrossEntropyLoss):
             loss = super().forward(input, target)
         return loss
 
-loss_handle = CrossEntropyLossWithAuxiliary()
-
-original_size = get_original_size(modules) # contains the number of non-zero parameters
-compressible_layers, num_weights = get_compressible_layers(modules) 
-compressible_size = get_compressible_size(modules) # contains the number of non-zero parameters belonging to the weight and the bias is excluded
-uncompressible_size = original_size - compressible_size # number of parameters that belong to the bias in different layers
-
-
-keep_ratio = 0.5
-delta_failure = 1e-16
-kr_min = 0.4 * keep_ratio
-kr_max = max(keep_ratio, 0.999)
-
-# """
-# Now let's calculate sensitivity
-# """
-
-for ell, module in enumerate(modules):
-    sens_trackers.append(PFPTracker(module))
-    sens_trackers[ell].enable_tracker()
-
-# get a loader with mini-batch size 1
-loader_mini = tensor.MiniDataLoader(loader_s, 1)
-num_batches = len(loader_mini)
-       
-for i_batch, (images, _) in enumerate(loader_mini):
-    outputs = net.forward_mod(images)
-    for ell in range(len(modules)):
-        module = sens_trackers[ell].module
-        #print(outputs[0][ell].shape, outputs[1][ell].shape)
-        sens_trackers[ell]._hook(module, (outputs[0][ell],), outputs[1][ell]) 
-
-"""
-obtaining the probability
-"""
-
-for ell in range(len(modules)):
-    sens_trackers[ell].probability = torch.zeros(sens_trackers[ell].sensitivity_in.shape)
-    nnz = (sens_trackers[ell].sensitivity_in != 0.0).sum().view(-1)
-    sum_sens = sens_trackers[ell].sensitivity_in.sum().view(-1)
-    sens_trackers[ell].probability = sens_trackers[ell].sensitivity_in / sum_sens
-
-# """
-# let's find the optimal compression rate possible that is close to the user requested compression
-# """
 
 def nan_to_minint(x):
     if math.isnan(x):
@@ -348,7 +362,7 @@ def get_layerwise_size_per_eps(eps):
         if in_features < 1:
             in_features = 1
 
-        total_in_features.append(int(in_features.data.numpy()))
+        total_in_features.append(int(in_features.data.cpu().numpy()))
         in_feat_reduction.append(get_num_features(weight, 1) - in_features)
 
     total_out_features = []
@@ -376,7 +390,7 @@ def find_opt_eps(budget):
     
     f_value_min = f_opt(eps_min)
     f_value_max = f_opt(eps_max)
-    #print(f_value_min, f_value_max)
+    print(f_value_min, f_value_max)
     if f_value_min * f_value_max > 0:
         print("pruning not possible")
         return 0
@@ -408,12 +422,16 @@ def sparsify(masked_features, weight_original):
     return nn.Parameter(weight_hat)
 
 def get_dummy_net(compressed_modules):
-    compressed_net = LeNet5(num_classes=10, num_in_channels=1)
+    compressed_net = AlexNet(num_classes=10).to(device)
     compressed_net.conv1 = compressed_modules[0]
+    print(compressed_net.conv1.weight.device)
     compressed_net.conv2 = compressed_modules[1]
-    compressed_net.fc1 = compressed_modules[2]
-    compressed_net.fc2 = compressed_modules[3]
-    compressed_net.fc3 = compressed_modules[4]
+    compressed_net.conv3 = compressed_modules[2]
+    compressed_net.conv4 = compressed_modules[3]
+    compressed_net.conv5 = compressed_modules[4]
+    compressed_net.fc1 = compressed_modules[5]
+    compressed_net.fc2 = compressed_modules[6]
+    compressed_net.fc3 = compressed_modules[7]
     
     return compressed_net
 
@@ -500,6 +518,7 @@ def compress_once(keep_ratio):
         size_pruned = pruned_input_size[ell]
 
         masked_features = prune(size_pruned, probs)
+        print(size_pruned)
         weight_hat = sparsify(masked_features, module.weight)
         module.weight.data = weight_hat
         
@@ -508,8 +527,11 @@ def compress_once(keep_ratio):
     compressed_net_modules = [module for module in compressed_net.modules() \
                if module != compressed_net and isinstance(module, nn.Module)]
     compressed_net_size = get_original_size(compressed_net_modules)
-
+    #print(compressed_net_size, original_size)
     print("achieved compression : ", compressed_net_size/original_size)
+    #accuracy = test(compressed_net, loader_test)*100
+    #print('Accuracy of the network on the 10000 test images: %.2f %%' % accuracy)
+    #print(modules[-1].weight, compressed_modules[-1].weight)
     return compressed_net_size, compressed_net
 
 # compress_once(0.5)
@@ -541,7 +563,7 @@ def compress(keep_ratio):
     try:
         kr_diff_nominal = _f_opt(keep_ratio)
         if kr_diff_nominal == 0.0:
-            return 0
+            return compress_once(keep_ratio)[1]
         elif kr_diff_nominal > 0.0:
             kr_max = keep_ratio
         else:
@@ -561,8 +583,9 @@ def compress(keep_ratio):
     except (ValueError, RuntimeError):
         kr_diff_opt = float("inf")
         kr_opt = None
-        for kr_compress in f_opt_lookup.items():
-            kr_diff = f_opt_lookup[kr_diff]
+        #print(f_opt_lookup)
+        for kr_compress in list(f_opt_lookup.items()):
+            kr_diff = f_opt_lookup[kr_compress]
             if abs(kr_diff) < abs(kr_diff_opt):
                 kr_diff_opt = kr_diff
                 kr_opt = kr_compress
@@ -574,34 +597,78 @@ def compress(keep_ratio):
 
     return compress_once(kr_opt)[1]
 
-final_compressed_net = compress(0.1)
+modules = [module for module in net.modules() if module != net and isinstance(module, nn.Module)]
+sens_trackers = nn.ModuleList()
 
-# Evaluate the model on the test set
+loss_handle = CrossEntropyLossWithAuxiliary()
 
-correct = 0
-total = 0
-with torch.no_grad():
-    for data in loader_test:
-        inputs, labels = data
-        outputs = final_compressed_net(inputs)
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-
-print('Accuracy on test set: %.2f %%' % (100 * correct / total))
+original_size = get_original_size(modules) # contains the number of non-zero parameters
+compressible_layers, num_weights = get_compressible_layers(modules) 
+compressible_size = get_compressible_size(modules) # contains the number of non-zero parameters belonging to the weight and the bias is excluded
+uncompressible_size = original_size - compressible_size # number of parameters that belong to the bias in different layers
 
 
+keep_ratio = 0.5
+delta_failure = 1e-16
+kr_min = 0.4 * keep_ratio
+kr_max = max(keep_ratio, 0.999)
 
-    
+for ell, module in enumerate(modules):
+    sens_trackers.append(PFPTracker(module))
+    sens_trackers[ell].enable_tracker()
 
+# get a loader with mini-batch size 1
+loader_mini = tensor.MiniDataLoader(loader_s, 1)
+num_batches = len(loader_mini)
 
-# net = tp.util.net.NetHandle(net, name)
-# net_filter_pruned = tp.PFPNet(net, loader_s, loss_handle)
-# print(
-#     f"The network has {net_filter_pruned.size()} parameters and "
-#     f"{net_filter_pruned.flops()} FLOPs left."
-# )
-# #net_filter_pruned.cuda()
-# net_filter_pruned.compress(keep_ratio=0.5)
-# #net_filter_pruned.cpu()
+for i_batch, (images, _) in enumerate(loader_mini):
+    print(i_batch, len(loader_mini))
+    images = images.to(device)
+    outputs = net.forward_mod(images)
+    for ell in range(len(modules)):
+        module = sens_trackers[ell].module
+        #print(module)
+        #print(outputs[0][ell].shape, outputs[1][ell].shape)
+        sens_trackers[ell]._hook(module, (outputs[0][ell],), outputs[1][ell]) 
 
+for ell in range(len(modules)):
+    sens_trackers[ell].probability = torch.zeros(sens_trackers[ell].sensitivity_in.shape)
+    nnz = (sens_trackers[ell].sensitivity_in != 0.0).sum().view(-1)
+    sum_sens = sens_trackers[ell].sensitivity_in.sum().view(-1)
+    sens_trackers[ell].probability = sens_trackers[ell].sensitivity_in / sum_sens
+
+keep_ratios = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.7, 0.9]
+error_percent_replication = []
+
+for j, keep_ratio in enumerate(keep_ratios):
+    print("---------------------------------------------------------------------------")
+    final_compressed_net = compress(keep_ratio)
+    final_compressed_net = final_compressed_net.to(device)
+    # Evaluate the model on the test set
+    model_path = '../checkpoints/' + name + 'pr_ratio_' + str(j) + '_.pth'
+    torch.save(final_compressed_net.state_dict(), model_path)
+    #loss = test(final_compressed_net, loader_test)
+    #print('Keep ratio : %0.2f, loss of the network on the 10000 test images: %f %%' % (keep_ratio, loss))
+    #error_percent_replication.append(loss)
+
+# # Plot the data
+# plt.plot(keep_ratios, error_percent_replication, '-o', label='replication')
+
+# loss = test(net, loader_test)
+# plt.plot(keep_ratios, [loss]*9, '-o', label='unpruned loss')
+
+# # Set the grid
+# plt.grid(True)
+
+# # Set the axes labels
+# plt.xlabel('Retained Parameters ratio')
+# plt.ylabel('Error')
+
+# # Set the title
+# plt.title('AlexNet pruning statistics - replication')
+
+# # Set the legend
+# plt.legend()
+
+# # Show the plot
+# plt.savefig('alexnet_prune_stats.png')

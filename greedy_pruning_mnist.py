@@ -124,43 +124,35 @@ class Mask(nn.Module):
     #     self.prune_gamma.data = 0. * self.prune_gamma.data
 
 
-class AlexNet(nn.Module):
+class LeNet5(nn.Module):
     def __init__(self, num_classes=10):
-        super(AlexNet, self).__init__()
+        super(LeNet5, self).__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(1, 6, kernel_size=5),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2),
-            nn.Conv2d(64, 192, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True), #
-            nn.MaxPool2d(kernel_size=2),
-            nn.Conv2d(192, 384, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(6, 16, kernel_size=5),
+            nn.ReLU(inplace=True), 
             nn.MaxPool2d(kernel_size=2),
         )
         self.classifier = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(256 * 2 * 2, 4096),
+            nn.Linear(16 * 4 * 4, 120),
             nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
+            nn.Linear(120, 84),
             nn.ReLU(inplace=True),
-            nn.Linear(4096, num_classes),
+            nn.Linear(84, num_classes),
         )
 
     def forward(self, x):
         x = self.features(x)
-        x = x.view(x.size(0), 256 * 2 * 2)
+        x = x.view(x.size(0), 16 * 4 * 4)
         x = self.classifier(x)
         return x
+
     
-class AlexNet_prescreen(nn.Module):
+class LeNet5_prescreen(nn.Module):
     def __init__(self, net):
-        super(AlexNet_prescreen, self).__init__()
+        super(LeNet5_prescreen, self).__init__()
         
         self.features = nn.Sequential(
             net.features[0],
@@ -171,23 +163,11 @@ class AlexNet_prescreen(nn.Module):
             net.features[4],
             Mask(D_in = net.features[3].weight.shape[0], layer_num = 1),
             net.features[5],
-            net.features[6],
-            net.features[7],
-            Mask(D_in = net.features[6].weight.shape[0], layer_num = 2),
-            net.features[8],
-            net.features[9],
-            Mask(D_in = net.features[8].weight.shape[0], layer_num = 3),
-            net.features[10],
-            net.features[11],
-            Mask(D_in = net.features[10].weight.shape[0], layer_num = 3),
-            net.features[12],
         )
         self.classifier = net.classifier
 
-        self.mask_features = [2,6,10,13,16]
-        self.conv_features = [0,4,8,11,14]
-        # self.pool_features = 
-        # self.relu_features = 
+        self.mask_features = [2,6]
+        self.conv_features = [0,4]
 
     def pforward(self, x, chosen_layer = -1):
         score = 0.
@@ -197,13 +177,13 @@ class AlexNet_prescreen(nn.Module):
                 score += l_score
             else:
                 x = block(x)
-        x = x.view(x.size(0), 256 * 2 * 2)
+        x = x.view(x.size(0), 16 * 4 * 4)
         x = self.classifier(x)
         return x, score, chosen_layer
 
     def forward(self, x):
         x = self.features(x)
-        x = x.view(x.size(0), 256 * 2 * 2)
+        x = x.view(x.size(0), 16 * 4 * 4)
         x = self.classifier(x)
         return x
 
@@ -320,7 +300,7 @@ def prune_a_layer(m):
 
 
     print("This layer's Neuron", cur_neuron)
-    pruned_accuracy = test_with_data(masked_net, validation_data)
+    pruned_accuracy = test(masked_net, val_loader)
     print("Accuracy : ", pruned_accuracy)
 
     a_para = m.prune_a.data
@@ -346,7 +326,7 @@ def net_prune(masked_net):
     for block_idx, block in enumerate(masked_net.features):
         print("pruning layer number : ", block_idx)
         mask_count = -1
-        if isinstance(block, Mask) and block_idx != 2:
+        if isinstance(block, Mask):
             #print(m)
             num_layer += 1
             isalladd = 0
@@ -394,11 +374,11 @@ def get_pruned_conv(conv, mask, inp_channels):
     return pruned_conv, out_channels
     
 
-class tem_AlexNet(nn.Module):
+class tem_LeNet(nn.Module):
     def __init__(self, net):
-        super(tem_AlexNet, self).__init__()
+        super(tem_LeNet, self).__init__()
         blocks = []
-        inp_channels = 3
+        inp_channels = 1
         out_features = 10
 
         self.features = []
@@ -416,28 +396,28 @@ class tem_AlexNet(nn.Module):
             self.features.append(m)
 
         self.features = nn.Sequential(*self.features)
-        self.classifier = nn.Linear(in_features=inp_channels*2*2, out_features=out_features, bias=True)
+        self.classifier = nn.Linear(in_features=inp_channels*4*4, out_features=out_features, bias=True)
         self.feat_channels = inp_channels
 
     def forward(self, x):
         x = self.features(x)
-        x = x.view(x.size(0), self.feat_channels * 2 * 2)
+        x = x.view(x.size(0), self.feat_channels * 4 * 4)
         x = self.classifier(x)
         return x
 
 
 def mb2_prune_ratio(masked_net):
-    net = AlexNet()
+    net = LeNet5()
     
     net.eval()
-    fullflops, fullparams = get_model_complexity_info(net, (3, 32, 32), as_strings=False,
+    fullflops, fullparams = get_model_complexity_info(net, (1, 28, 28), as_strings=False,
                                                       print_per_layer_stat=False)
     copy_masked_net = copy.deepcopy(masked_net)
-    pruned_network = tem_AlexNet(copy_masked_net).cpu()
+    pruned_network = tem_LeNet(copy_masked_net).cpu()
     pruned_network.eval()
     # print(pruned_network)
 
-    pruneflops, pruneparams = get_model_complexity_info(pruned_network, (3, 32, 32), as_strings=False,
+    pruneflops, pruneparams = get_model_complexity_info(pruned_network, (1, 28, 28), as_strings=False,
                                                         print_per_layer_stat=False)
 
     # print('calculation pruned finish')
@@ -447,53 +427,39 @@ def mb2_prune_ratio(masked_net):
     return fullflops, pruneflops, fullparams, pruneparams
 
 
-def get_dataset(dset_name, batch_size, n_worker, data_root, skip = 1):
-    cifar_tran_train = [
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ]
-    cifar_tran_test = [
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ]
-    
-    print('=> Preparing data..')
-    transform_train = transforms.Compose(cifar_tran_train)
-    transform_test = transforms.Compose(cifar_tran_test)
-    trainset = torchvision.datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform_train)
-    train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True,
-                                               num_workers=n_worker, pin_memory=True, sampler=None)
-    
-    full_size = len(train_loader)
-    indices = list(range(full_size))
-    split_indices = list(np.arange(0, full_size, skip))
-    valid_sampler = SubsetRandomSampler(split_indices)
+"""
+data loader
+"""
 
-    eval_trainset = torchvision.datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform_train)
-    eval_train_loader = torch.utils.data.DataLoader(eval_trainset, batch_size=batch_size, shuffle=False,
-                                                               num_workers=n_worker, pin_memory=True, sampler=valid_sampler)
-    #eval_train_loader = torch.utils.data.DataLoader(
-    #    datasets.ImageFolder(traindir, transforms.Compose(imagenet_tran_train)),
-    #    batch_size=batch_size, shuffle=False,
-    #    num_workers=n_worker, pin_memory=True, sampler=valid_sampler)
+transform = torchvision.transforms.Compose(
+    [torchvision.transforms.ToTensor(),
+     torchvision.transforms.Normalize((0.5,), (0.5,))])
 
-    testset = torchvision.datasets.CIFAR10(root=data_root, train=False, download=True, transform=transform_test)
-    val_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False,
-                                             num_workers=n_worker, pin_memory=True)
-    n_class = 10
+trainset = torchvision.datasets.MNIST(root='./data', train=True,
+                                      download=True, transform=transform)
 
-    return train_loader, eval_train_loader, val_loader, n_class
+testset = torchvision.datasets.MNIST(root='./data', train=False,
+                                     download=True, transform=transform)
 
+size_s = 64
+batch_size = 64
+testset, set_s = torch.utils.data.random_split(
+    testset, [len(testset) - size_s, size_s]
+)
 
+loader_s = torch.utils.data.DataLoader(set_s, batch_size=32, shuffle=False)
+val_loader = torch.utils.data.DataLoader(
+    testset, batch_size=batch_size, shuffle=False
+)
+trainloader = torch.utils.data.DataLoader(
+    trainset, batch_size=batch_size, shuffle=False
+)
 
-# Load the CIFAR-10 dataset
-trainloader, eval_train_loader, val_loader, n_class = get_dataset('cifar10', 128, 1, data_root='../../Network-Pruning-Greedy-Forward-Selection/dataroot', skip=200)
+eval_train_loader = trainloader
 
 # Instantiate the AlexNet model and move it to the GPU if available
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-net = AlexNet().to(device)
+net = LeNet5().to(device)
 
 # Define the loss function and optimizer
 criterion = nn.CrossEntropyLoss()
@@ -561,7 +527,7 @@ def test_with_data(net, data):
 
 
 
-model_path = '../../checkpoints/alexnet_cifar10.pth'
+model_path = '../../checkpoints/lenet5_mnist_pfp.pth'
 if os.path.isfile(model_path):
     checkpt = torch.load(model_path)
     net.load_state_dict(checkpt)
@@ -574,8 +540,8 @@ net.eval()
 loss = test(net, val_loader)
 print('Loss of the network on the 10000 test images: %f' % loss)
 
-#epsilon_vals = [0.1, 0.5, 0.8, 0.9, 0.95, 0.99, 0.999, 0.9999] 
-epsilon_vals = [0.99]
+epsilon_vals = [1*i/50 for i in range(50)] 
+# epsilon_vals = [0.99]
 num_evaluate = 10000
 
 pr_vals = []
@@ -584,13 +550,13 @@ acc_vals = []
 for eps_idx in range(len(epsilon_vals)):
     print("------------------------------------------")
     epsilon = epsilon_vals[eps_idx]
-    masked_net = AlexNet_prescreen(net).to(device)
+    masked_net = LeNet5_prescreen(net).to(device)
     masked_net.eval()
     masked_net = net_prune(masked_net)
     acc = test(masked_net, val_loader)
     _, _, full_params, prune_params = mb2_prune_ratio(masked_net)
     pr = prune_params / full_params
-    pr_vals.append(pr)
+    pr_vals.append(prune_params)
     acc_vals.append(acc)
 
 print(pr_vals)
